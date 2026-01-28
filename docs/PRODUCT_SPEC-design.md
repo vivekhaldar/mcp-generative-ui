@@ -1,9 +1,9 @@
 # MCP Generative UI Wrapper - Technical Design Document
 
-**Version:** 1.1
+**Version:** 1.2
 **Author:** Vivek Haldar
 **Date:** 2026-01-28
-**Status:** Draft (Revised after design review)
+**Status:** Draft (Revised after design review round 2)
 **Companion Document:** [PRODUCT_SPEC.md](./PRODUCT_SPEC.md)
 
 ---
@@ -64,6 +64,11 @@ This design covers V1 of the wrapper, which:
 - The host sandbox prevents direct network access from UI iframes
 - Refinements are not isolated by user/session (acceptable for single-user)
 
+**Host capability detection:**
+- On startup, wrapper verifies host supports `ui://` resources via capability negotiation
+- If host does not support MCP Apps, wrapper logs error and operates in pass-through mode (no UI generation)
+- This is a **hard requirement** - generated UIs cannot function without host support
+
 **Out of scope for V1:**
 - Multi-user deployments with session isolation
 - Hosts that don't support MCP Apps (ui:// resources)
@@ -112,8 +117,19 @@ This is a fundamental limitation. The LLM might generate a table UI for `list_us
 **Mitigation strategies:**
 - Always include JSON fallback display
 - Generate defensive rendering code that handles unexpected structures
-- Classify tools conservatively (prefer minimal UI when uncertain)
+- **Bias toward minimal UI** - classify tools conservatively; prefer minimal when uncertain
 - Allow refinement to fix visualization mismatches
+
+**V2 consideration: Output schema inference**
+
+A future version could attempt to infer output structure by:
+- Calling the tool with a safe sample input (if tool supports dry-run or has no side effects)
+- Caching the result structure for subsequent UI generation
+
+This is deferred because:
+- Many tools have side effects (can't safely call them speculatively)
+- Adds significant complexity and latency
+- Refinement provides an escape hatch for mismatched visualizations
 
 ---
 
@@ -195,6 +211,20 @@ This is a fundamental limitation. The LLM might generate a table UI for `list_us
 
 **Verdict**: Deferred. V1 will show a "Generating UI..." placeholder, then swap in the complete UI.
 
+### 3.6 Tool Allow-List for UI Generation
+
+**Approach**: Require explicit opt-in for which tools get UIs generated.
+
+**Pros**:
+- Safer for destructive/admin tools
+- User controls LLM API costs
+
+**Cons**:
+- Adds configuration friction
+- Against "zero-config" goal
+
+**Verdict**: Adopted as optional. Default: all tools get UIs. Config option `enabledTools` allows explicit allow-list. See section 6.2.
+
 ---
 
 ## 4. Detailed Design
@@ -205,7 +235,7 @@ This is a fundamental limitation. The LLM might generate a table UI for `list_us
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              MCP Host                                        │
 │                       (Claude Desktop, etc.)                                 │
-└─────────────────────────────────┬───────────────────────────────────────────┘
+└─────────────────────────────────────────────────────────────────────────────┘
                                   │ MCP Protocol (stdio or SSE)
                                   ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -220,9 +250,9 @@ This is a fundamental limitation. The LLM might generate a table UI for `list_us
 │  │  • Exposes wrapper introspection tools (_ui_*)                         │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
 │                                  │                                           │
-│        ┌─────────────────────────┼─────────────────────────┐                │
-│        │                         │                         │                │
-│        ▼                         ▼                         ▼                │
+│        ┌─────────────────────────┼─────────────────────────────┐            │
+│        │                         │                             │            │
+│        ▼                         ▼                             ▼            │
 │  ┌───────────────┐    ┌───────────────────┐    ┌───────────────────┐       │
 │  │  Tool Proxy   │    │   UI Generator    │    │   Cache Manager   │       │
 │  │               │    │                   │    │                   │       │
@@ -326,20 +356,44 @@ Host               Wrapper                    LLM API
 
 ### 4.3 Key Design Decisions
 
-#### 4.3.1 On-Demand Generation with Hard Timeout
+#### 4.3.1 On-Demand Generation with Hard Timeout and Cancellation
 
 When a UI resource is first requested, we generate synchronously with a hard timeout:
 
-1. **Hard timeout: 15 seconds** - If generation exceeds this, return minimal UI immediately
+1. **Hard timeout: 15 seconds** - If generation exceeds this, abort and return minimal UI immediately
 2. MCP resource reads can take time (the protocol doesn't assume instant responses)
 3. LLM generation typically completes in 3-10 seconds
 4. Subsequent requests hit cache (<50ms)
 
-**Timeout behavior:**
-- At 15s, abort LLM request and serve minimal UI template
+**Timeout and cancellation behavior:**
+- Generation uses an `AbortController` with 15s total budget
+- Retries share this budget (not 15s per attempt)
+- At timeout, abort LLM request immediately (don't wait for response)
+- Serve minimal UI template on timeout
 - Log the timeout with correlation ID
-- Cache the minimal UI so the user sees something immediately
+- Cache the minimal UI so subsequent requests are fast
 - User can trigger `_ui_regenerate` to retry
+
+**Time budget across retries:**
+```typescript
+const TOTAL_TIMEOUT_MS = 15000;
+const startTime = Date.now();
+
+for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  const remainingMs = TOTAL_TIMEOUT_MS - (Date.now() - startTime);
+  if (remainingMs <= 0) break;  // Time budget exhausted
+
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), remainingMs);
+
+  try {
+    return await generateWithAbort(abortController.signal);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+// Fall through to minimal UI
+```
 
 Alternative considered: Return a "loading" placeholder immediately, generate async, require client to poll. Rejected because it complicates client logic and the MCP host may not support it gracefully.
 
@@ -356,29 +410,39 @@ Refinement is exposed as an MCP tool (`_ui_refine`) rather than a separate API b
 Cache keys must uniquely identify the **complete generation context**, including prompts and configuration:
 
 ```
-key = hash(tool_name + schema_hash + refinement_hash + config_hash)
+key = hash(tool_name + tool_hash + refinement_hash + config_hash)
 ```
 
 Where:
-- `schema_hash = SHA256(JSON.stringify(inputSchema))`
+- `tool_hash = SHA256(canonicalJson(name + description + inputSchema))`
 - `refinement_hash = SHA256(refinements.join('|'))`
-- `config_hash = SHA256(promptVersion + llmModel + temperature + systemPromptHash)`
+- `config_hash = SHA256(promptVersion + templateVersion + llmModel + temperature + systemPromptHash)`
+
+**Canonical JSON serialization:**
+To ensure stable hashes regardless of object key ordering:
+```typescript
+function canonicalJson(obj: unknown): string {
+  return JSON.stringify(obj, Object.keys(obj).sort());
+}
+```
 
 **Cache key components:**
 
 | Component | Purpose |
 |-----------|---------|
 | `tool_name` | Identifies the tool |
-| `schema_hash` | Invalidates on schema changes |
+| `tool_hash` | Invalidates on **any** tool metadata change (name, description, schema) |
 | `refinement_hash` | Unique entry per refinement sequence |
-| `promptVersion` | Invalidates when prompts change |
+| `promptVersion` | Invalidates when generation prompts change |
+| `templateVersion` | Invalidates when minimal UI template changes |
 | `llmModel` | Different models produce different UIs |
 | `systemPromptHash` | Invalidates when system prompt changes |
 
 This ensures:
+- Tool description changes invalidate cache (descriptions affect prompts)
 - Schema changes invalidate cache automatically
 - Each refinement sequence produces a unique cache entry
-- **Prompt or config changes invalidate all cached UIs**
+- **Prompt, template, or config changes invalidate all cached UIs**
 - Same tool with same refinements and config always hits cache
 
 **Cache versioning:**
@@ -391,6 +455,18 @@ Every generation failure path leads to the minimal UI template. This guarantees:
 1. Users always see *something* functional
 2. Raw JSON output is always accessible
 3. Tool invocation still works
+
+#### 4.3.5 Tool Removal Handling
+
+When the upstream server removes a tool:
+
+1. On `_ui_refresh_tools` or periodic refresh, detect the removal
+2. Mark the tool as "removed" in the registry (don't delete immediately)
+3. `tools/list` no longer includes the removed tool
+4. `resources/list` no longer includes the `ui://` resource
+5. `resources/read` for removed tool returns MCP error: `{ code: -32001, message: "Resource not found: ui://tool-name" }`
+6. Cache entries for removed tools are invalidated
+7. Refinement history for removed tools is cleared
 
 ---
 
@@ -417,7 +493,13 @@ Every generation failure path leads to the minimal UI template. This guarantees:
 async function handleToolsList(): Promise<Tool[]> {
   const upstreamTools = await toolProxy.getTools();
 
-  const wrappedTools = upstreamTools.map(tool => ({
+  // Filter by allow-list if configured
+  const enabledTools = config.generation.enabledTools;
+  const filteredTools = enabledTools
+    ? upstreamTools.filter(t => enabledTools.includes(t.name))
+    : upstreamTools;
+
+  const wrappedTools = filteredTools.map(tool => ({
     ...tool,
     _meta: {
       ...tool._meta,
@@ -456,8 +538,9 @@ async function handleToolsList(): Promise<Tool[]> {
 - Maintains a persistent connection to the upstream server
 - Supports both stdio (spawn subprocess) and SSE (HTTP connection) transports
 - Caches tool definitions locally for fast lookup
-- **Periodic tool refresh**: Every 5 minutes (configurable), re-fetch tool list and compare
+- **On-demand refresh only**: By default, tool list is fetched once at startup
 - **Manual refresh**: `_ui_refresh_tools` tool triggers immediate refresh
+- **Optional periodic refresh**: Disabled by default; enable via `toolRefresh.enabled: true`
 - **Backoff on failure**: If refresh fails, wait 30s, 60s, 120s (max) before retry
 
 ```typescript
@@ -466,8 +549,15 @@ interface ToolProxy {
   getTools(): Promise<ToolDefinition[]>;
   callTool(name: string, args: Record<string, unknown>): Promise<ToolResult>;
   disconnect(): Promise<void>;
-  refreshTools(): Promise<void>;  // Manual refresh
-  onToolsChanged(callback: (tools: ToolDefinition[]) => void): void;
+  refreshTools(): Promise<ToolRefreshResult>;  // Manual refresh
+  onToolsChanged(callback: (changes: ToolRefreshResult) => void): void;
+}
+
+interface ToolRefreshResult {
+  added: string[];
+  removed: string[];
+  changed: string[];  // Schema or description changed
+  unchanged: number;
 }
 ```
 
@@ -475,11 +565,28 @@ interface ToolProxy {
 
 ```typescript
 interface ToolRefreshConfig {
-  intervalMs: number;       // Default: 300000 (5 min)
+  enabled: boolean;         // Default: false (on-demand only)
+  intervalMs: number;       // Default: 300000 (5 min), only if enabled
   retryBackoffMs: number[]; // Default: [30000, 60000, 120000]
-  enabled: boolean;         // Default: true
 }
 ```
+
+**SSE transport specifics:**
+
+```typescript
+interface SSETransportConfig {
+  url: string;
+  headers?: Record<string, string>;
+  reconnectDelayMs: number;      // Default: 1000
+  maxReconnectDelayMs: number;   // Default: 30000
+  reconnectBackoffMultiplier: number;  // Default: 2
+}
+```
+
+- Single persistent connection (not per-request)
+- Automatic reconnection with exponential backoff
+- In-flight requests fail on disconnect; caller must retry
+- No authentication refresh in V1 (out of scope)
 
 ### 5.3 UI Generator
 
@@ -499,10 +606,11 @@ interface ToolRefreshConfig {
 - Manages prompt templates as external files
 - Validates generated HTML before returning
 - Implements retry logic with exponential backoff
+- Uses AbortController for cancellation
 
 ```typescript
 interface UIGenerator {
-  generate(context: UIGenerationContext): Promise<GenerationResult>;
+  generate(context: UIGenerationContext, signal?: AbortSignal): Promise<GenerationResult>;
   setProvider(provider: LLMProvider): void;
   loadPromptTemplates(directory: string): void;
 }
@@ -512,6 +620,7 @@ interface GenerationResult {
   uiType: "rich" | "minimal";
   generationDurationMs: number;
   tokensUsed: number;
+  fallbackReason?: string;  // Set if minimal UI was used due to error/timeout
 }
 ```
 
@@ -537,6 +646,12 @@ interface GenerationResult {
 - Filesystem persistence is optional, enabled via config
 - Cache entries include generation metadata for debugging
 - **Version field**: Cache entries include `cacheVersion` for migration
+
+**Cache size rationale:**
+- Typical minimal UI: ~15-20KB
+- Typical rich UI: ~30-80KB
+- 500KB per entry handles extreme cases (complex SVG charts, large inline data)
+- 50MB total allows ~600-3000 cached UIs, far more than typical use
 
 ```typescript
 interface CacheManager {
@@ -620,10 +735,11 @@ interface WrappedToolDefinition extends ToolDefinition {
 // Internal registry entry
 interface ToolRegistryEntry {
   original: ToolDefinition;
-  schemaHash: string;
+  toolHash: string;  // Hash of name + description + schema
   uiResourceUri: string;
   uiType: "rich" | "minimal" | "undetermined";
   refinementHistory: RefinementEntry[];
+  status: "active" | "removed";
 }
 
 // Refinement feedback
@@ -641,7 +757,9 @@ interface CacheEntry {
   generationDurationMs: number;
   llmModel: string;
   promptVersion: string;
+  templateVersion: string;
   context: UIGenerationContext;
+  cacheVersion: number;  // For migration
 }
 
 // Context passed to LLM for generation
@@ -665,12 +783,13 @@ interface UIGenerationContext {
   }>;
 }
 
-// Generation configuration for controlling costs and quality
+// Centralized limits configuration
 interface GenerationLimits {
   maxPromptTokens: number;      // Default: 4000
   maxOutputTokens: number;      // Default: 8000
   maxRefinementHistory: number; // Default: 5 (older refinements truncated)
   maxSchemaDepth: number;       // Default: 5 (deeper schemas flattened)
+  maxOutputDisplayBytes: number; // Default: 102400 (100KB) - truncate large results
 }
 ```
 
@@ -692,6 +811,9 @@ interface WrapperConfig {
 
   // Logging
   logging: LoggingConfig;
+
+  // Tool refresh settings
+  toolRefresh?: ToolRefreshConfig;
 }
 
 interface StdioUpstreamConfig {
@@ -706,12 +828,14 @@ interface SSEUpstreamConfig {
   transport: "sse";
   url: string;
   headers?: Record<string, string>;
+  reconnectDelayMs?: number;
+  maxReconnectDelayMs?: number;
 }
 
 interface LLMConfig {
   provider: "anthropic" | "openai" | "ollama";
   model: string;
-  apiKey?: string;        // Falls back to env var
+  apiKey?: string;        // Falls back to env var; WARNING: prefer env vars
   baseUrl?: string;       // For custom endpoints
   maxTokens?: number;     // Default: 4096
   temperature?: number;   // Default: 0.2
@@ -731,16 +855,24 @@ interface GenerationConfig {
   promptsDirectory?: string;
   maxRetries?: number;          // Default: 2
   retryDelayMs?: number;        // Default: 1000
-  timeoutMs?: number;           // Default: 15000 (hard timeout)
+  timeoutMs?: number;           // Default: 15000 (hard timeout for entire generation)
   maxConcurrentGenerations?: number;  // Default: 2
   limits?: GenerationLimits;
+  enabledTools?: string[];      // Optional allow-list; if unset, all tools get UIs
 }
 
 interface LoggingConfig {
   level: "debug" | "info" | "warn" | "error";
   format: "json" | "text";
   destination: "stdout" | "file";
-  file?: string;
+  file?: string;                // Required if destination is "file"
+  redactSensitiveData?: boolean; // Default: true in production
+}
+
+interface ToolRefreshConfig {
+  enabled: boolean;         // Default: false
+  intervalMs?: number;      // Default: 300000 (5 min)
+  retryBackoffMs?: number[]; // Default: [30000, 60000, 120000]
 }
 ```
 
@@ -771,7 +903,9 @@ interface LoggingConfig {
           "properties": {
             "transport": { "const": "sse" },
             "url": { "type": "string", "format": "uri" },
-            "headers": { "type": "object", "additionalProperties": { "type": "string" } }
+            "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+            "reconnectDelayMs": { "type": "integer", "minimum": 100 },
+            "maxReconnectDelayMs": { "type": "integer", "minimum": 1000 }
           }
         }
       ]
@@ -782,7 +916,10 @@ interface LoggingConfig {
       "properties": {
         "provider": { "enum": ["anthropic", "openai", "ollama"] },
         "model": { "type": "string" },
-        "apiKey": { "type": "string" },
+        "apiKey": {
+          "type": "string",
+          "description": "WARNING: Prefer environment variables (ANTHROPIC_API_KEY, OPENAI_API_KEY) over config file"
+        },
         "baseUrl": { "type": "string", "format": "uri" },
         "maxTokens": { "type": "integer", "minimum": 1 },
         "temperature": { "type": "number", "minimum": 0, "maximum": 2 }
@@ -794,6 +931,8 @@ interface LoggingConfig {
         "type": { "enum": ["memory", "filesystem"], "default": "memory" },
         "directory": { "type": "string" },
         "maxEntries": { "type": "integer", "minimum": 1, "default": 100 },
+        "maxEntrySizeBytes": { "type": "integer", "minimum": 1024, "default": 512000 },
+        "maxTotalSizeBytes": { "type": "integer", "minimum": 1048576, "default": 52428800 },
         "persistOnShutdown": { "type": "boolean", "default": false }
       }
     },
@@ -803,7 +942,14 @@ interface LoggingConfig {
         "defaultTheme": { "enum": ["light", "dark", "system"], "default": "light" },
         "promptsDirectory": { "type": "string" },
         "maxRetries": { "type": "integer", "minimum": 0, "default": 2 },
-        "retryDelayMs": { "type": "integer", "minimum": 0, "default": 1000 }
+        "retryDelayMs": { "type": "integer", "minimum": 0, "default": 1000 },
+        "timeoutMs": { "type": "integer", "minimum": 1000, "default": 15000 },
+        "maxConcurrentGenerations": { "type": "integer", "minimum": 1, "default": 2 },
+        "enabledTools": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "If set, only these tools will get generated UIs"
+        }
       }
     },
     "logging": {
@@ -812,7 +958,22 @@ interface LoggingConfig {
         "level": { "enum": ["debug", "info", "warn", "error"], "default": "info" },
         "format": { "enum": ["json", "text"], "default": "text" },
         "destination": { "enum": ["stdout", "file"], "default": "stdout" },
-        "file": { "type": "string" }
+        "file": { "type": "string" },
+        "redactSensitiveData": { "type": "boolean", "default": true }
+      },
+      "if": { "properties": { "destination": { "const": "file" } } },
+      "then": { "required": ["file"] }
+    },
+    "toolRefresh": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean", "default": false },
+        "intervalMs": { "type": "integer", "minimum": 10000, "default": 300000 },
+        "retryBackoffMs": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "default": [30000, 60000, 120000]
+        }
       }
     }
   }
@@ -871,6 +1032,7 @@ The wrapper exposes standard MCP methods plus wrapper-specific tools.
   }
 }
 // Response: generated HTML with mimeType "text/html;profile=mcp-app"
+// Error if tool removed: { code: -32001, message: "Resource not found" }
 ```
 
 #### 7.1.2 Wrapper Introspection Tools
@@ -928,13 +1090,15 @@ The wrapper exposes standard MCP methods plus wrapper-specific tools.
           name: "get_weather",
           uiType: "rich",
           cached: true,
-          refinements: 2
+          refinements: 2,
+          enabled: true
         },
         {
           name: "set_units",
           uiType: "minimal",
           cached: true,
-          refinements: 0
+          refinements: 0,
+          enabled: true
         }
       ]
     }, null, 2)
@@ -973,6 +1137,7 @@ The wrapper exposes standard MCP methods plus wrapper-specific tools.
       generationDurationMs: 3420,
       llmModel: "claude-sonnet-4-20250514",
       promptVersion: "1.0",
+      templateVersion: "1.0",
       refinementHistory: [
         "use dark theme",
         "add wind speed to the display"
@@ -1049,7 +1214,7 @@ The wrapper exposes standard MCP methods plus wrapper-specific tools.
 interface LLMProvider {
   name: string;
 
-  generate(request: LLMRequest): Promise<LLMResponse>;
+  generate(request: LLMRequest, signal?: AbortSignal): Promise<LLMResponse>;
 
   // For streaming support (future)
   generateStream?(request: LLMRequest): AsyncIterable<string>;
@@ -1080,7 +1245,7 @@ interface LLMResponse {
 
 // Standardized error codes for retry logic
 interface LLMError {
-  code: "TIMEOUT" | "RATE_LIMIT" | "INVALID_REQUEST" | "SERVER_ERROR" | "NETWORK_ERROR" | "CONTENT_FILTERED";
+  code: "TIMEOUT" | "RATE_LIMIT" | "INVALID_REQUEST" | "SERVER_ERROR" | "NETWORK_ERROR" | "CONTENT_FILTERED" | "ABORTED";
   message: string;
   retryable: boolean;
   retryAfterMs?: number;
@@ -1090,20 +1255,24 @@ interface LLMError {
 
 **Concurrency Control:**
 
-The wrapper enforces generation concurrency to prevent LLM rate limits:
+The wrapper enforces generation concurrency to prevent LLM rate limits. Configuration is centralized in `GenerationConfig.maxConcurrentGenerations`:
 
 ```typescript
 interface GenerationQueue {
-  maxConcurrent: number;  // Default: 2
+  // Configured via GenerationConfig.maxConcurrentGenerations (default: 2)
   pending: Map<string, Promise<GenerationResult>>;  // Keyed by tool name
 
   // If a generation for this tool is in-flight, return its promise
-  // Otherwise, start a new generation
+  // Otherwise, start a new generation (if under concurrency limit)
+  // If at limit, wait for a slot
   enqueue(toolName: string, generator: () => Promise<GenerationResult>): Promise<GenerationResult>;
 }
 ```
 
-This provides per-tool deduplication: if multiple requests come in for `ui://get_weather` while generation is in progress, they all wait for the same result.
+This provides:
+- Per-tool deduplication: multiple requests for `ui://get_weather` share one generation
+- Global concurrency limit: respects `maxConcurrentGenerations` across all tools
+- Backpressure: requests queue when at limit (with timeout)
 
 #### 7.2.2 Transport Interface
 
@@ -1116,6 +1285,7 @@ interface UpstreamTransport {
   send(method: string, params?: unknown): Promise<unknown>;
 
   onNotification(callback: (method: string, params: unknown) => void): void;
+  onDisconnect(callback: () => void): void;
 }
 ```
 
@@ -1142,6 +1312,7 @@ interface UpstreamTransport {
 ┌─────────────────────────────────────────────────────────────────────┐
 │  2. UI Type Classification                                          │
 │     • LLM classifies tool as "rich" or "minimal"                    │
+│     • Bias toward minimal when uncertain                            │
 │     • Minimal = simple form + JSON output                           │
 │     • Rich = custom visualization (chart, table, cards, etc.)       │
 └─────────────────────────────────────────────────────────────────────┘
@@ -1164,6 +1335,7 @@ interface UpstreamTransport {
                    │                         ▼
                    │               ┌───────────────────┐
                    │               │  4. LLM Call      │
+                   │               │     • With abort  │
                    │               │     • Retry on    │
                    │               │       failure     │
                    │               └─────────┬─────────┘
@@ -1171,11 +1343,11 @@ interface UpstreamTransport {
                    └──────────┬──────────────┘
                               ▼
 ┌─────────────────────────────────────────────────────────────────────┐
-│  5. HTML Validation                                                  │
+│  5. HTML Validation (Defense-in-Depth)                              │
 │     • Parse HTML (check well-formedness)                            │
 │     • Verify App API import present                                 │
 │     • Verify ontoolresult handler present                           │
-│     • Check for forbidden patterns (external scripts, etc.)         │
+│     • Check for forbidden patterns (advisory, not security gate)    │
 └─────────────────────────────────────────────────────────────────────┘
                               │
                     ┌─────────┴─────────┐
@@ -1227,6 +1399,7 @@ CRITICAL CONSTRAINTS:
 - Do NOT include any external scripts or stylesheets
 - Do NOT use eval(), new Function(), or document.write()
 - Do NOT access parent, top, or opener
+- Do NOT use innerHTML with user data - use textContent for safety
 
 REQUIREMENTS:
 1. Output a single HTML file with inline <style> and <script type="module">
@@ -1242,10 +1415,17 @@ REQUIREMENTS:
 
 IMPORTANT - OUTPUT HANDLING:
 - You do NOT know the structure of tool results in advance
-- ALWAYS include a JSON fallback display for raw results
-- Wrap rendering in try/catch - if parsing/rendering fails, show raw JSON
+- ALWAYS include a "Show Raw JSON" toggle as fallback
+- Wrap all rendering in try/catch - if parsing/rendering fails, show raw JSON
 - Handle these result content types: text, image (base64), error
+- Handle ALL content items in the result array, not just the first one
 - Results may be arrays or objects - handle both
+- Truncate very large outputs (>100KB) with "Show more" option
+
+IMPORTANT - INPUT HANDLING:
+- Coerce form values to correct types (boolean, number, integer)
+- Respect JSON Schema constraints when possible (min, max, pattern)
+- Pre-fill default values from schema
 
 ERROR HANDLING PATTERN (include this in every UI):
 window.onerror = (msg) => {
@@ -1280,6 +1460,7 @@ REQUIREMENTS:
 - Theme: {{hints.theme}}
 - Create appropriate form controls for each input property
 - Handle required vs optional fields appropriately
+- Pre-fill default values from schema
 - Add loading state while tool is executing
 - Show errors clearly with option to retry
 
@@ -1289,6 +1470,7 @@ OUTPUT HANDLING (CRITICAL):
 - ALWAYS include a "Show Raw JSON" toggle as fallback
 - Wrap all rendering code in try/catch
 - If rendering fails, fall back to JSON.stringify(result, null, 2)
+- Handle ALL content items in the result, not just the first
 ```
 
 Note: Tool definition is wrapped in delimiters to prevent prompt injection from malicious tool descriptions.
@@ -1305,16 +1487,20 @@ INPUT SCHEMA: {{JSON.stringify(tool.inputSchema)}}
 Respond with exactly one word: "rich" or "minimal"
 
 Guidelines:
-- "rich": Tools that return structured data suitable for visualization (lists, charts, tables, maps, timelines)
-- "minimal": Tools that perform actions with simple success/failure, set preferences, or return unstructured text
+- "rich": Tools that CLEARLY return structured data suitable for visualization (lists, charts, tables, maps, timelines)
+- "minimal": Tools that perform actions, set preferences, return unstructured text, OR when uncertain
+
+BIAS TOWARD MINIMAL. Only choose "rich" when you are confident the output is structured and visualizable.
 
 Examples:
-- get_weather -> rich (can visualize temperature, conditions)
-- list_files -> rich (can show as table/tree)
+- get_weather -> rich (temperature, conditions are visualizable)
+- list_files -> rich (file list is tabular)
 - delete_item -> minimal (action confirmation)
 - set_preference -> minimal (simple toggle/success)
 - search_database -> rich (results table)
 - send_notification -> minimal (action confirmation)
+- get_config -> minimal (structure unknown, probably JSON)
+- run_query -> minimal (output structure unknown)
 ```
 
 ### 8.3 JSON Schema Support
@@ -1329,9 +1515,15 @@ The minimal UI template supports a **subset of JSON Schema**. Complex schemas fa
 | `string` + `enum` | `<select>` with options |
 | `string` + `format: "date"` | `<input type="date">` |
 | `string` + `format: "email"` | `<input type="email">` |
+| `string` + `format: "uri"` | `<input type="url">` |
 | `integer` | `<input type="number" step="1">` |
+| `integer` + `minimum/maximum` | Adds `min`/`max` attributes |
 | `number` | `<input type="number" step="any">` |
-| `boolean` | `<select>` with Yes/No |
+| `number` + `minimum/maximum` | Adds `min`/`max` attributes |
+| `boolean` | `<select>` with Yes/No (or checkbox) |
+| `string` + `minLength/maxLength` | Adds `minlength`/`maxlength` attributes |
+| `string` + `pattern` | Adds `pattern` attribute |
+| `default` values | Pre-filled in form |
 
 **Unsupported (fallback to JSON textarea):**
 
@@ -1348,7 +1540,12 @@ The minimal UI template supports a **subset of JSON Schema**. Complex schemas fa
 
 ### 8.4 Minimal UI Template
 
-This template is used for tools classified as "minimal" or as a fallback:
+This template is used for tools classified as "minimal" or as a fallback. Key improvements from review:
+- Proper type coercion for form values
+- Support for JSON Schema constraints (min, max, pattern, etc.)
+- Pre-fill default values
+- Handle all content items (not just first)
+- Use textContent instead of innerHTML for user data
 
 ```html
 <!DOCTYPE html>
@@ -1388,6 +1585,7 @@ This template is used for tools classified as "minimal" or as a fallback:
       border-color: #007bff;
       box-shadow: 0 0 0 2px rgba(0,123,255,0.15);
     }
+    input:invalid { border-color: #c00; }
     button {
       background: #007bff;
       color: white;
@@ -1413,6 +1611,7 @@ This template is used for tools classified as "minimal" or as a fallback:
       word-break: break-word;
       font-size: 0.8125rem;
     }
+    .result img { max-width: 100%; margin: 8px 0; }
     .error {
       display: none;
       margin-top: 16px;
@@ -1439,6 +1638,20 @@ This template is used for tools classified as "minimal" or as a fallback:
       66% { content: '..'; }
       100% { content: '...'; }
     }
+    .toggle-raw {
+      font-size: 0.75rem;
+      color: #007bff;
+      background: none;
+      border: none;
+      padding: 0;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    .truncated-notice {
+      font-size: 0.75rem;
+      color: #666;
+      margin-top: 4px;
+    }
   </style>
 </head>
 <body>
@@ -1454,25 +1667,35 @@ This template is used for tools classified as "minimal" or as a fallback:
       {{#if (eq this.type "boolean")}}
       <select id="{{@key}}" name="{{@key}}">
         <option value="">-- Select --</option>
-        <option value="true">Yes</option>
-        <option value="false">No</option>
+        <option value="true" {{#if this.default}}selected{{/if}}>Yes</option>
+        <option value="false" {{#unless this.default}}{{#if (isDefined this.default)}}selected{{/if}}{{/unless}}>No</option>
       </select>
       {{else if this.enum}}
       <select id="{{@key}}" name="{{@key}}" {{#if (includes ../inputSchema.required @key)}}required{{/if}}>
         <option value="">-- Select --</option>
         {{#each this.enum}}
-        <option value="{{this}}">{{this}}</option>
+        <option value="{{this}}" {{#if (eq this ../this.default)}}selected{{/if}}>{{this}}</option>
         {{/each}}
       </select>
       {{else if (eq this.type "integer")}}
       <input type="number" id="{{@key}}" name="{{@key}}" step="1"
+        {{#if this.minimum}}min="{{this.minimum}}"{{/if}}
+        {{#if this.maximum}}max="{{this.maximum}}"{{/if}}
+        {{#if this.default}}value="{{this.default}}"{{/if}}
         {{#if (includes ../inputSchema.required @key)}}required{{/if}}>
       {{else if (eq this.type "number")}}
       <input type="number" id="{{@key}}" name="{{@key}}" step="any"
+        {{#if this.minimum}}min="{{this.minimum}}"{{/if}}
+        {{#if this.maximum}}max="{{this.maximum}}"{{/if}}
+        {{#if this.default}}value="{{this.default}}"{{/if}}
         {{#if (includes ../inputSchema.required @key)}}required{{/if}}>
       {{else}}
-      <input type="text" id="{{@key}}" name="{{@key}}"
+      <input type="{{schemaFormatToInputType this.format}}" id="{{@key}}" name="{{@key}}"
         placeholder="{{this.description}}"
+        {{#if this.minLength}}minlength="{{this.minLength}}"{{/if}}
+        {{#if this.maxLength}}maxlength="{{this.maxLength}}"{{/if}}
+        {{#if this.pattern}}pattern="{{this.pattern}}"{{/if}}
+        {{#if this.default}}value="{{this.default}}"{{/if}}
         {{#if (includes ../inputSchema.required @key)}}required{{/if}}>
       {{/if}}
     </div>
@@ -1485,21 +1708,29 @@ This template is used for tools classified as "minimal" or as a fallback:
   <div class="error" id="error"></div>
   <div class="result" id="result" style="display: none;">
     <strong>Result:</strong>
-    <pre id="result-content"></pre>
+    <div id="result-content"></div>
+    <button class="toggle-raw" id="toggle-raw">Show Raw JSON</button>
+    <pre id="raw-json" style="display: none;"></pre>
   </div>
 
   <script type="module">
     import { App } from "@modelcontextprotocol/ext-apps";
 
     const app = new App({ name: "{{tool.name}}-ui", version: "1.0.0" });
+    const MAX_DISPLAY_SIZE = 102400; // 100KB
+
+    // Schema info for type coercion
+    const schema = {{JSON.stringify(tool.inputSchema)}};
 
     window.onerror = (msg) => {
-      document.getElementById('error').textContent = msg;
+      document.getElementById('error').textContent = String(msg);
       document.getElementById('error').style.display = 'block';
       document.getElementById('loading').style.display = 'none';
     };
 
     await app.connect();
+
+    let lastRawResult = null;
 
     app.ontoolresult = (result) => {
       document.getElementById('loading').style.display = 'none';
@@ -1507,14 +1738,29 @@ This template is used for tools classified as "minimal" or as a fallback:
       document.getElementById('result').style.display = 'block';
       document.getElementById('submit-btn').disabled = false;
 
+      lastRawResult = result;
+      const resultContent = document.getElementById('result-content');
+      const rawJson = document.getElementById('raw-json');
+
+      // Store raw JSON for toggle
+      const rawStr = JSON.stringify(result, null, 2);
+      if (rawStr.length > MAX_DISPLAY_SIZE) {
+        rawJson.textContent = rawStr.slice(0, MAX_DISPLAY_SIZE) + '\n... (truncated)';
+      } else {
+        rawJson.textContent = rawStr;
+      }
+
       // Handle different content types robustly
       try {
         if (!result.content || !Array.isArray(result.content)) {
-          document.getElementById('result-content').textContent = JSON.stringify(result, null, 2);
+          resultContent.textContent = JSON.stringify(result, null, 2);
           return;
         }
 
-        // Check for error content
+        // Clear previous content
+        resultContent.innerHTML = '';
+
+        // Check for error content first
         const errorContent = result.content.find(c => c.type === "error");
         if (errorContent) {
           document.getElementById('error').textContent = errorContent.message || "Tool returned an error";
@@ -1523,45 +1769,83 @@ This template is used for tools classified as "minimal" or as a fallback:
           return;
         }
 
-        // Handle text content
-        const textContent = result.content.find(c => c.type === "text");
-        if (textContent?.text) {
-          try {
-            const parsed = JSON.parse(textContent.text);
-            document.getElementById('result-content').textContent = JSON.stringify(parsed, null, 2);
-          } catch {
-            document.getElementById('result-content').textContent = textContent.text;
+        // Process ALL content items
+        for (const item of result.content) {
+          if (item.type === "text" && item.text) {
+            const pre = document.createElement('pre');
+            try {
+              const parsed = JSON.parse(item.text);
+              const str = JSON.stringify(parsed, null, 2);
+              if (str.length > MAX_DISPLAY_SIZE) {
+                pre.textContent = str.slice(0, MAX_DISPLAY_SIZE);
+                const notice = document.createElement('div');
+                notice.className = 'truncated-notice';
+                notice.textContent = `Output truncated (${str.length} bytes). See raw JSON for full content.`;
+                resultContent.appendChild(pre);
+                resultContent.appendChild(notice);
+              } else {
+                pre.textContent = str;
+                resultContent.appendChild(pre);
+              }
+            } catch {
+              pre.textContent = item.text;
+              resultContent.appendChild(pre);
+            }
+          } else if (item.type === "image" && item.data) {
+            const img = document.createElement('img');
+            img.src = `data:${item.mimeType || 'image/png'};base64,${item.data}`;
+            img.alt = "Tool result image";
+            resultContent.appendChild(img);
           }
-          return;
         }
 
-        // Handle image content (base64)
-        const imageContent = result.content.find(c => c.type === "image");
-        if (imageContent?.data) {
-          const img = document.createElement('img');
-          img.src = `data:${imageContent.mimeType || 'image/png'};base64,${imageContent.data}`;
-          img.style.maxWidth = '100%';
-          document.getElementById('result-content').innerHTML = '';
-          document.getElementById('result-content').appendChild(img);
-          return;
+        // If nothing rendered, show raw
+        if (resultContent.children.length === 0) {
+          const pre = document.createElement('pre');
+          pre.textContent = JSON.stringify(result.content, null, 2);
+          resultContent.appendChild(pre);
         }
-
-        // Fallback: show raw content
-        document.getElementById('result-content').textContent = JSON.stringify(result.content, null, 2);
       } catch (e) {
         // Ultimate fallback
-        document.getElementById('result-content').textContent = JSON.stringify(result, null, 2);
+        resultContent.textContent = JSON.stringify(result, null, 2);
       }
     };
+
+    // Toggle raw JSON view
+    document.getElementById('toggle-raw').addEventListener('click', () => {
+      const rawJson = document.getElementById('raw-json');
+      const btn = document.getElementById('toggle-raw');
+      if (rawJson.style.display === 'none') {
+        rawJson.style.display = 'block';
+        btn.textContent = 'Hide Raw JSON';
+      } else {
+        rawJson.style.display = 'none';
+        btn.textContent = 'Show Raw JSON';
+      }
+    });
 
     document.getElementById('tool-form').addEventListener('submit', async (e) => {
       e.preventDefault();
 
       const formData = new FormData(e.target);
       const args = {};
+
       for (const [key, value] of formData.entries()) {
-        if (value !== '') {
-          // Type coercion based on schema
+        if (value === '') continue;
+
+        // Type coercion based on schema
+        const propSchema = schema.properties?.[key];
+        if (propSchema) {
+          if (propSchema.type === 'boolean') {
+            args[key] = value === 'true';
+          } else if (propSchema.type === 'integer') {
+            args[key] = parseInt(value, 10);
+          } else if (propSchema.type === 'number') {
+            args[key] = parseFloat(value);
+          } else {
+            args[key] = value;
+          }
+        } else {
           args[key] = value;
         }
       }
@@ -1587,7 +1871,7 @@ This template is used for tools classified as "minimal" or as a fallback:
 
 ### 8.5 HTML Validation Rules
 
-The validator checks generated HTML for:
+The validator checks generated HTML for correctness. **Important:** Validation is defense-in-depth, not a security gate. The host sandbox is the primary security boundary.
 
 | Check | Required | Action on Failure |
 |-------|----------|-------------------|
@@ -1596,10 +1880,10 @@ The validator checks generated HTML for:
 | Imports `@modelcontextprotocol/ext-apps` | Yes | Inject import |
 | Calls `app.connect()` | Yes | Inject connection |
 | Has `ontoolresult` handler | Yes | Inject minimal handler |
-| No external scripts | Yes | **Hard failure → fallback** |
-| No inline event handlers (`on*=`) | Yes | **Hard failure → fallback** |
-| No `eval()`, `Function()`, `document.write()` | Yes | **Hard failure → fallback** |
-| No `parent.`, `top.`, `opener.` access | Yes | **Hard failure → fallback** |
+| No external scripts | Yes | **Fallback** |
+| No inline event handlers (`on*=`) | Yes | **Fallback** |
+| No `eval()`, `Function()`, `document.write()` | Advisory | **Log warning**, allow if host sandboxed |
+| No `parent.`, `top.`, `opener.` access | Advisory | **Log warning**, allow if host sandboxed |
 | Form inputs have labels | Warning | Log warning, allow |
 | Size under 500KB | Yes | **Hard failure → fallback** |
 
@@ -1609,12 +1893,16 @@ V1 uses regex-based validation which has known limitations:
 - Can produce false positives (flagging strings in content)
 - Can be bypassed with creative encoding (e.g., `parent['frames']`)
 
-**Mitigations:**
-- Prompts explicitly forbid these patterns
-- Regex patterns are conservative (err toward fallback)
-- V2 should use AST-based JS parsing for accurate detection
+**Why regex validation is acceptable for V1:**
+- The **host sandbox** is the actual security boundary
+- Validation catches common LLM mistakes (external scripts, missing API)
+- False positives cause fallback to minimal UI (safe, not broken)
+- Bypasses would still be caught by the host sandbox
 
-**Important:** The host sandbox is the primary security boundary. Validation is defense-in-depth, not the sole protection.
+**V2 improvement:** Use an AST parser (e.g., acorn) to analyze JS accurately. This is deferred because:
+- Added complexity and dependency
+- Marginal security improvement (host sandbox is primary)
+- V1 targets single-user developer exploration
 
 ---
 
@@ -1625,57 +1913,79 @@ V1 uses regex-based validation which has known limitations:
 | Category | Examples | Strategy |
 |----------|----------|----------|
 | **Connection Errors** | Upstream server unreachable, transport failure | Return MCP error, retry with backoff |
-| **Generation Errors** | LLM timeout, rate limit, invalid response | Retry once, then serve minimal UI |
+| **Generation Errors** | LLM timeout, rate limit, invalid response | Retry within time budget, then serve minimal UI |
 | **Validation Errors** | Malformed HTML, missing App API | Attempt repair, then serve minimal UI |
 | **Runtime Errors** | JS error in generated UI | Caught by error boundary, show raw data |
 | **Tool Errors** | Upstream tool returns error | Forward to UI, display with context |
 
-### 9.2 Retry Policy
+### 9.2 Retry Policy with Time Budget
 
 ```typescript
-const RETRY_CONFIG = {
-  maxAttempts: 3,
-  baseDelayMs: 1000,
-  maxDelayMs: 10000,
-  backoffMultiplier: 2,
-};
+interface RetryConfig {
+  maxAttempts: number;      // Default: 3
+  baseDelayMs: number;      // Default: 1000
+  maxDelayMs: number;       // Default: 5000
+  backoffMultiplier: number; // Default: 2
+  totalTimeoutMs: number;   // Default: 15000 (hard limit)
+}
 
 // Standardized error codes (mapped from provider-specific errors)
 type RetryableErrorCode = "TIMEOUT" | "RATE_LIMIT" | "NETWORK_ERROR" | "SERVER_ERROR";
-type NonRetryableErrorCode = "INVALID_REQUEST" | "CONTENT_FILTERED";
+type NonRetryableErrorCode = "INVALID_REQUEST" | "CONTENT_FILTERED" | "ABORTED";
 
-async function withRetry<T>(
-  operation: () => Promise<T>,
-  mapError: (e: unknown) => LLMError,  // Provider-specific error mapping
-  config = RETRY_CONFIG
+async function withRetryAndTimeout<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  mapError: (e: unknown) => LLMError,
+  config: RetryConfig
 ): Promise<T> {
+  const startTime = Date.now();
+  const controller = new AbortController();
+
+  // Master timeout
+  const masterTimeout = setTimeout(() => controller.abort(), config.totalTimeoutMs);
+
   let lastError: LLMError;
   let delay = config.baseDelayMs;
 
-  for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
-    try {
-      return await operation();
-    } catch (error) {
-      // Map provider-specific error to standard error
-      lastError = mapError(error);
+  try {
+    for (let attempt = 1; attempt <= config.maxAttempts; attempt++) {
+      const elapsed = Date.now() - startTime;
+      const remaining = config.totalTimeoutMs - elapsed;
 
-      if (!lastError.retryable) {
-        throw lastError;
+      if (remaining <= 0) {
+        throw { code: "TIMEOUT", message: "Time budget exhausted", retryable: false };
       }
 
-      // Respect Retry-After header if present
-      if (lastError.retryAfterMs) {
-        delay = lastError.retryAfterMs;
-      }
+      try {
+        return await operation(controller.signal);
+      } catch (error) {
+        if (controller.signal.aborted) {
+          throw { code: "ABORTED", message: "Generation aborted", retryable: false };
+        }
 
-      if (attempt < config.maxAttempts) {
-        await sleep(delay);
-        delay = Math.min(delay * config.backoffMultiplier, config.maxDelayMs);
+        lastError = mapError(error);
+
+        if (!lastError.retryable) {
+          throw lastError;
+        }
+
+        // Check if we have time for another attempt
+        const nextAttemptDelay = lastError.retryAfterMs ?? delay;
+        if (elapsed + nextAttemptDelay >= config.totalTimeoutMs) {
+          throw lastError;  // No time for retry
+        }
+
+        if (attempt < config.maxAttempts) {
+          await sleep(Math.min(nextAttemptDelay, remaining));
+          delay = Math.min(delay * config.backoffMultiplier, config.maxDelayMs);
+        }
       }
     }
-  }
 
-  throw lastError;
+    throw lastError;
+  } finally {
+    clearTimeout(masterTimeout);
+  }
 }
 ```
 
@@ -1740,7 +2050,8 @@ All wrapper-handled errors return standard MCP error format:
       toolName: "get_weather",
       errorType: "GENERATION_TIMEOUT",
       fallbackUsed: "minimal_template",
-      retryable: false
+      retryable: false,
+      requestId: "a1b2c3d4-..."  // For correlation
     }
   }
 }
@@ -1766,23 +2077,24 @@ All wrapper-handled errors return standard MCP error format:
 
 | Threat | Attack Vector | Mitigation |
 |--------|---------------|------------|
-| **Prompt Injection** | Malicious tool description injects LLM instructions | Delimiter-based prompt structure + length limits |
-| **XSS in Generated UI** | LLM generates malicious JS | Host sandbox + validation + forbidden pattern detection |
-| **Data Exfiltration** | Generated UI sends data to external server | Host sandbox network policy (we rely on this) |
-| **Credential Leakage** | LLM API key exposed to UI or logs | Keys in env vars only, never logged or in generated code |
-| **Parent Frame Access** | Generated JS tries to escape sandbox | Host sandbox + forbidden pattern validation |
+| **Prompt Injection** | Malicious tool description injects LLM instructions | Delimiter-based prompt structure + length limits + output heuristics |
+| **XSS in Generated UI** | LLM generates malicious JS | Host sandbox (primary) + validation (defense-in-depth) |
+| **Data Exfiltration** | Generated UI sends data to external server | Host sandbox network policy |
+| **Credential Leakage** | LLM API key exposed to UI or logs | Keys in env vars only, never logged, redact in debug mode |
+| **Parent Frame Access** | Generated JS tries to escape sandbox | Host sandbox (primary) |
 | **Resource Exhaustion** | Unbounded generation requests | Concurrency limits, cache, size limits |
 | **Large Response DoS** | LLM returns huge HTML | Max output tokens + size validation |
+| **Tool call abuse** | Malicious UI calls tools in a loop | Out of scope for wrapper; tool auth is upstream responsibility |
 
 ### 10.3 Prompt Injection Mitigation
 
 Tool metadata from the upstream server is **untrusted**. Simple sanitization (regex) is insufficient.
 
-**Strategy: Delimiter-based isolation**
+**Strategy: Defense in depth**
 
+1. **Delimiter-based isolation:**
 ```typescript
 function buildPrompt(tool: ToolDefinition): string {
-  // Use unique delimiters that are unlikely in tool content
   const delimiter = "===TOOL_DEFINITION_START===";
   const endDelimiter = "===TOOL_DEFINITION_END===";
 
@@ -1801,10 +2113,14 @@ Your task: Generate an HTML UI for the tool described above.
 }
 ```
 
-**Additional mitigations:**
-- Length limits on all fields
-- System prompt explicitly instructs to treat tool content as data
-- Output validation catches common injection artifacts
+2. **Length limits on all fields**
+
+3. **Output heuristics** - Check generated HTML for signs of prompt injection:
+   - Unexpected instructions or meta-commentary
+   - References to "ignore previous instructions"
+   - Content that doesn't look like HTML
+
+4. **Conservative fallback** - If heuristics trigger, use minimal UI
 
 **Limitation:** Sophisticated prompt injection may still succeed. The host sandbox is the ultimate security boundary.
 
@@ -1823,29 +2139,22 @@ function validateGeneratedHTML(html: string, maxSizeBytes: number = 512000): Val
   const warnings: string[] = [];
   const sizeBytes = new TextEncoder().encode(html).length;
 
-  // Size check
+  // Size check - HARD FAILURE
   if (sizeBytes > maxSizeBytes) {
     errors.push(`HTML size ${sizeBytes} exceeds max ${maxSizeBytes}`);
   }
 
-  // HARD FAILURES - these cause immediate fallback to minimal UI
-  const forbiddenPatterns = [
-    { pattern: /eval\s*\(/gi, message: "eval() is forbidden" },
-    { pattern: /new\s+Function\s*\(/gi, message: "Function constructor is forbidden" },
-    { pattern: /document\.write/gi, message: "document.write is forbidden" },
-    { pattern: /\bparent\s*\./gi, message: "parent frame access is forbidden" },
-    { pattern: /\btop\s*\./gi, message: "top frame access is forbidden" },
-    { pattern: /\bopener\s*\./gi, message: "opener access is forbidden" },
-    { pattern: /<script[^>]+src\s*=/gi, message: "External scripts forbidden" },
-    { pattern: /<link[^>]+href\s*=/gi, message: "External stylesheets forbidden" },
-    { pattern: /\bon\w+\s*=/gi, message: "Inline event handlers forbidden" },
-    { pattern: /javascript\s*:/gi, message: "javascript: URLs forbidden" },
-  ];
+  // External resources - HARD FAILURE (not about security, about functionality)
+  if (/<script[^>]+src\s*=/gi.test(html)) {
+    errors.push("External scripts forbidden - UI must be self-contained");
+  }
+  if (/<link[^>]+href\s*=/gi.test(html)) {
+    errors.push("External stylesheets forbidden - UI must be self-contained");
+  }
 
-  for (const { pattern, message } of forbiddenPatterns) {
-    if (pattern.test(html)) {
-      errors.push(message);
-    }
+  // Inline event handlers - HARD FAILURE (CSP compatibility)
+  if (/\bon\w+\s*=/gi.test(html)) {
+    errors.push("Inline event handlers forbidden - use addEventListener");
   }
 
   // Required patterns
@@ -1859,7 +2168,24 @@ function validateGeneratedHTML(html: string, maxSizeBytes: number = 512000): Val
     errors.push("Missing app.connect() call");
   }
 
-  // Warnings (don't cause failure)
+  // Advisory warnings (logged but don't cause failure if host is sandboxed)
+  const advisoryPatterns = [
+    { pattern: /eval\s*\(/gi, message: "eval() detected" },
+    { pattern: /new\s+Function\s*\(/gi, message: "Function constructor detected" },
+    { pattern: /document\.write/gi, message: "document.write detected" },
+    { pattern: /\bparent\s*\./gi, message: "parent frame access detected" },
+    { pattern: /\btop\s*\./gi, message: "top frame access detected" },
+    { pattern: /\bopener\s*\./gi, message: "opener access detected" },
+    { pattern: /javascript\s*:/gi, message: "javascript: URL detected" },
+  ];
+
+  for (const { pattern, message } of advisoryPatterns) {
+    if (pattern.test(html)) {
+      warnings.push(`${message} (relying on host sandbox)`);
+    }
+  }
+
+  // Accessibility check
   if (!/<label/i.test(html)) {
     warnings.push("No form labels found (accessibility)");
   }
@@ -1876,8 +2202,7 @@ function validateGeneratedHTML(html: string, maxSizeBytes: number = 512000): Val
 **Known limitations of regex validation:**
 - False positives: May flag `parent.` in string literals or comments
 - Bypasses: `parent['document']` or `window['parent']` would evade detection
-
-**V2 improvement:** Use an AST parser (e.g., acorn) to analyze JS accurately.
+- This is acceptable because the host sandbox catches these
 
 ### 10.5 Credential Management
 
@@ -1886,12 +2211,12 @@ function validateGeneratedHTML(html: string, maxSizeBytes: number = 512000): Val
 │                    Credential Flow                               │
 └─────────────────────────────────────────────────────────────────┘
 
-Environment Variables (secure):
+Environment Variables (PREFERRED):
   ANTHROPIC_API_KEY, OPENAI_API_KEY, OLLAMA_API_KEY
          │
          ▼
     ┌─────────┐
-    │ Wrapper │ ◄── Config file MAY contain apiKey (not recommended)
+    │ Wrapper │ ◄── Config file MAY contain apiKey (NOT recommended)
     └────┬────┘
          │
          ├───────────────────────────────────────────┐
@@ -1905,6 +2230,12 @@ Environment Variables (secure):
                                               No credentials
                                               ever included
 ```
+
+**Debug mode logging:**
+When `--debug` is enabled, prompts and responses are logged. By default:
+- API keys are NEVER logged
+- Tool descriptions are logged (may contain sensitive info - user's responsibility)
+- Set `logging.redactSensitiveData: true` to truncate long tool descriptions
 
 ---
 
@@ -1975,10 +2306,12 @@ mcp_gen_ui_cache_misses_total{tool="get_forecast"} 3
 When `--debug` flag is set:
 
 1. Verbose logging (all debug events)
-2. Generated prompts logged before LLM call
+2. Generated prompts logged before LLM call (tool descriptions may be truncated if sensitive)
 3. Raw LLM responses logged
 4. Generated HTML saved to disk for inspection
 5. Cache disabled (every request regenerates)
+
+**WARNING:** Debug mode logs may contain tool descriptions from upstream servers. These are user-controlled and may contain sensitive information. Logs should not be shared publicly without review.
 
 ---
 
@@ -2011,7 +2344,7 @@ When `--debug` flag is set:
       "type": "object",
       "properties": {
         "location": { "type": "string" },
-        "days": { "type": "integer", "minimum": 1, "maximum": 14 }
+        "days": { "type": "integer", "minimum": 1, "maximum": 14, "default": 7 }
       },
       "required": ["location"]
     }
@@ -2079,6 +2412,8 @@ The LLM generates something like:
   <div id="error" style="display: none;"></div>
 
   <div id="forecast-grid" class="forecast-grid"></div>
+  <button class="toggle-raw" id="toggle-raw" style="display: none;">Show Raw JSON</button>
+  <pre id="raw-json" style="display: none;"></pre>
 
   <script type="module">
     import { App } from "@modelcontextprotocol/ext-apps";
@@ -2090,30 +2425,66 @@ The LLM generates something like:
     const daysValue = document.getElementById('days-value');
     daysSlider.addEventListener('input', () => daysValue.textContent = daysSlider.value);
 
+    let lastResult = null;
+
     app.ontoolresult = (result) => {
       document.getElementById('loading').style.display = 'none';
+      lastResult = result;
+
+      // Store raw for toggle
+      document.getElementById('raw-json').textContent = JSON.stringify(result, null, 2);
+      document.getElementById('toggle-raw').style.display = 'block';
 
       const text = result.content?.find(c => c.type === "text")?.text;
-      if (!text) return;
+      if (!text) {
+        document.getElementById('error').textContent = 'No text content in result';
+        document.getElementById('error').style.display = 'block';
+        return;
+      }
 
       try {
         const forecast = JSON.parse(text);
         const grid = document.getElementById('forecast-grid');
-        grid.innerHTML = forecast.map(day => `
-          <div class="day-card">
-            <div class="date">${day.date}</div>
-            <div class="temps">
-              <span class="high">${day.high}°</span> /
-              <span class="low">${day.low}°</span>
-            </div>
-            <div class="conditions">${day.conditions}</div>
-          </div>
-        `).join('');
+        // Use textContent for safety, build DOM properly
+        grid.innerHTML = '';
+        for (const day of forecast) {
+          const card = document.createElement('div');
+          card.className = 'day-card';
+
+          const dateEl = document.createElement('div');
+          dateEl.className = 'date';
+          dateEl.textContent = day.date;
+          card.appendChild(dateEl);
+
+          const tempsEl = document.createElement('div');
+          tempsEl.className = 'temps';
+          tempsEl.innerHTML = `<span class="high">${day.high}°</span> / <span class="low">${day.low}°</span>`;
+          card.appendChild(tempsEl);
+
+          const condEl = document.createElement('div');
+          condEl.className = 'conditions';
+          condEl.textContent = day.conditions;
+          card.appendChild(condEl);
+
+          grid.appendChild(card);
+        }
       } catch (e) {
-        document.getElementById('error').textContent = 'Failed to parse forecast';
+        document.getElementById('error').textContent = 'Failed to parse forecast - see raw JSON';
         document.getElementById('error').style.display = 'block';
       }
     };
+
+    document.getElementById('toggle-raw').addEventListener('click', () => {
+      const rawJson = document.getElementById('raw-json');
+      const btn = document.getElementById('toggle-raw');
+      if (rawJson.style.display === 'none') {
+        rawJson.style.display = 'block';
+        btn.textContent = 'Hide Raw JSON';
+      } else {
+        rawJson.style.display = 'none';
+        btn.textContent = 'Show Raw JSON';
+      }
+    });
 
     document.getElementById('forecast-form').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -2126,7 +2497,7 @@ The LLM generates something like:
         name: "get_forecast",
         arguments: {
           location: formData.get('location'),
-          days: parseInt(formData.get('days'))
+          days: parseInt(formData.get('days'), 10)
         }
       });
     });
@@ -2205,10 +2576,12 @@ User sees updated UI with line chart instead of cards.
      "level": "warn",
      "component": "ui_generator",
      "event": "fallback_used",
+     "requestId": "a1b2c3d4-...",
      "tool_name": "get_weather",
      "metadata": {
        "reason": "validation_failed",
-       "errors": ["Missing App API import", "Malformed HTML structure"]
+       "errors": ["Missing App API import", "Malformed HTML structure"],
+       "fallbackType": "minimal_template"
      }
    }
    ```
@@ -2237,16 +2610,19 @@ User sees updated UI with line chart instead of cards.
 - Support environment variable overrides
 - Create JSON Schema for config validation
 - Add CLI argument parsing (commander.js)
+- Centralize limits in single config module
 
 **Files:**
 - `src/config/schema.ts`
 - `src/config/loader.ts`
+- `src/config/limits.ts` (centralized limits)
 - `src/cli.ts`
 
 **Tests:**
 - Config loading with various formats
 - Environment variable precedence
 - Invalid config rejection
+- JSON Schema completeness matches TypeScript interface
 
 #### Task 1.3: Logging System
 - Implement structured logger with correlation IDs
@@ -2254,25 +2630,30 @@ User sees updated UI with line chart instead of cards.
 - Add log levels and filtering
 - Create debug mode with verbose output
 - Add request ID propagation utilities
+- Implement sensitive data redaction
 
 **Files:**
 - `src/logging/logger.ts`
 - `src/logging/formatters.ts`
 - `src/logging/context.ts` (correlation ID management)
+- `src/logging/redaction.ts`
 
 **Tests:**
 - Log level filtering
 - JSON output format
 - Debug mode behavior
 - Correlation ID propagation through async operations
+- Sensitive data redaction
 
 ### Phase 2: MCP Protocol Layer (Week 2-3)
 
 #### Task 2.1: Tool Proxy - Stdio Transport
 - Implement stdio transport for spawning upstream server
 - Handle process lifecycle (spawn, monitor, restart)
-- Parse MCP messages from stdout
+- Parse MCP messages from stdout (JSON-RPC framing)
 - Send requests via stdin
+- Handle partial message buffering
+- Implement graceful shutdown
 
 **Files:**
 - `src/transport/stdio.ts`
@@ -2282,25 +2663,31 @@ User sees updated UI with line chart instead of cards.
 - Spawn mock server, exchange messages
 - Handle server crash/restart
 - Timeout handling
+- Partial message buffering (split JSON across chunks)
+- Process cleanup on shutdown
 
 #### Task 2.2: Tool Proxy - SSE Transport
 - Implement SSE transport for HTTP-based servers
-- Handle connection, reconnection
+- Handle connection, reconnection with exponential backoff
 - Parse SSE event stream
+- Handle in-flight request failures on disconnect
 
 **Files:**
 - `src/transport/sse.ts`
 
 **Tests:**
 - Connect to mock SSE server
-- Handle disconnection/reconnection
+- Handle disconnection/reconnection with backoff
 - Timeout and error handling
+- In-flight request handling on disconnect
 
 #### Task 2.3: MCP Server Interface
 - Implement MCP server using `@modelcontextprotocol/sdk`
 - Handle `initialize`, `tools/list`, `tools/call`
 - Handle `resources/list`, `resources/read`
 - Add `_meta.ui.resourceUri` to tool definitions
+- Detect host MCP Apps capability
+- Handle removed tools (return 404 on resource read)
 
 **Files:**
 - `src/server/mcp-server.ts`
@@ -2311,15 +2698,17 @@ User sees updated UI with line chart instead of cards.
 - Respond to tools/list with augmented tools
 - Proxy tools/call to upstream
 - Serve ui:// resources
+- Host capability detection
+- Removed tool handling
 
 ### Phase 3: UI Generation (Week 3-4)
 
 #### Task 3.1: LLM Provider Abstraction
-- Define provider interface with error mapping
-- Implement Anthropic provider
-- Implement OpenAI provider
+- Define provider interface with error mapping and abort support
+- Implement Anthropic provider with AbortController
+- Implement OpenAI provider with AbortController
 - Implement Ollama provider
-- Implement generation queue with per-tool deduplication
+- Implement generation queue with per-tool deduplication and concurrency limit
 
 **Files:**
 - `src/llm/provider.ts`
@@ -2331,30 +2720,36 @@ User sees updated UI with line chart instead of cards.
 **Tests:**
 - Mock API responses
 - Provider-specific error mapping to standard codes
-- Retry logic with backoff
+- Retry logic with time budget (not per-attempt timeout)
 - Concurrent request deduplication
 - Respect Retry-After headers
+- Abort/cancellation handling
 
 #### Task 3.2: Prompt Management
 - Load prompt templates from filesystem
 - Implement template rendering (Handlebars or simple string replacement)
 - Support prompt versioning
+- Implement canonical JSON serialization for cache keys
 
 **Files:**
 - `src/generation/prompts/system.txt`
 - `src/generation/prompts/generate.txt`
 - `src/generation/prompts/classify.txt`
 - `src/generation/prompt-manager.ts`
+- `src/utils/canonical-json.ts`
 
 **Tests:**
 - Template rendering with variables
 - Refinement history inclusion
+- Prompt version tracking
+- Canonical JSON ordering
 
 #### Task 3.3: UI Generator Core
-- Implement generation pipeline
-- Handle tool classification (rich vs minimal)
+- Implement generation pipeline with AbortController
+- Handle tool classification (rich vs minimal) with bias toward minimal
 - Integrate with LLM provider
-- Implement retry logic
+- Implement retry logic with time budget
+- Add output heuristics for prompt injection detection
 
 **Files:**
 - `src/generation/generator.ts`
@@ -2363,12 +2758,15 @@ User sees updated UI with line chart instead of cards.
 **Tests:**
 - Generate UI from tool metadata
 - Handle LLM errors gracefully
-- Classification accuracy
+- Classification bias toward minimal
+- Time budget enforcement across retries
+- Prompt injection heuristics
+- **Golden tests**: Fixed prompts → expected HTML structure (snapshot tests)
 
 #### Task 3.4: HTML Validation
 - Implement HTML parser (use `htmlparser2` or similar)
 - Check for required patterns
-- Check for forbidden patterns (hard failures)
+- Check for forbidden patterns (advisory warnings)
 - Size limit enforcement
 - Implement repair logic with explicit rules
 
@@ -2378,35 +2776,44 @@ User sees updated UI with line chart instead of cards.
 
 **Tests:**
 - Detect missing App API
-- Detect forbidden patterns (eval, external scripts, inline handlers)
-- Detect frame escape attempts (parent, top, opener)
+- Detect forbidden patterns (external scripts, inline handlers)
+- Advisory patterns logged but allowed (eval, parent access)
 - Size limit violations
 - Repair: inject App API when missing
 - Repair: add error handler when missing
-- Document known regex bypass patterns (for awareness)
+- **Security tests**: Verify known bypasses are documented
 
 #### Task 3.5: Minimal UI Template
 - Create template system for minimal UIs
-- Generate form fields from JSON Schema
+- Generate form fields from JSON Schema with constraints
+- Support default values
+- Implement proper type coercion
+- Handle all content types in result rendering
 - Render template with tool metadata
 
 **Files:**
 - `src/generation/templates/minimal.html`
 - `src/generation/template-renderer.ts`
+- `src/generation/result-renderer.ts` (shared result rendering logic)
 
 **Tests:**
 - Generate forms for various schemas
-- Handle nested objects
-- Handle arrays
+- Type coercion (boolean, integer, number)
+- JSON Schema constraints (min, max, pattern, etc.)
+- Default value population
+- Handle nested objects (fallback to textarea)
+- Handle arrays (fallback to textarea)
+- Multiple content items in result
+- Large output truncation
 
 ### Phase 4: Caching (Week 4-5)
 
 #### Task 4.1: Cache Manager
 - Implement in-memory LRU cache with size limits
-- Implement cache key computation (including config hash)
-- Add schema hash function
+- Implement cache key computation with canonical JSON
+- Add tool hash function (name + description + schema)
 - Add refinement history hash
-- Add prompt version tracking in keys
+- Add config hash (prompt version, template version, model)
 
 **Files:**
 - `src/cache/manager.ts`
@@ -2417,12 +2824,16 @@ User sees updated UI with line chart instead of cards.
 - LRU eviction by count and size
 - Key uniqueness across config changes
 - Prompt version changes invalidate cache
+- Template version changes invalidate cache
+- Tool description changes invalidate cache
 - Size limit enforcement (per-entry and total)
+- Canonical JSON produces stable keys
 
 #### Task 4.2: Filesystem Persistence
 - Implement save/load from disk
 - Handle atomic writes
 - Add startup restore
+- Handle cache version migration
 
 **Files:**
 - `src/cache/persistence.ts`
@@ -2431,6 +2842,7 @@ User sees updated UI with line chart instead of cards.
 - Persist and restore cycle
 - Handle corrupted files
 - Handle missing directory
+- Cache version migration
 
 ### Phase 5: Refinement & Introspection (Week 5)
 
@@ -2438,6 +2850,7 @@ User sees updated UI with line chart instead of cards.
 - Track refinement history per tool
 - Compute history hash
 - Clear history on demand
+- Clear history on tool removal
 
 **Files:**
 - `src/refinement/manager.ts`
@@ -2446,6 +2859,7 @@ User sees updated UI with line chart instead of cards.
 - Accumulate refinements
 - Hash consistency
 - Clear individual vs all
+- Clear on tool removal
 
 #### Task 5.2: Wrapper Tools
 - Implement `_ui_refine` handler
@@ -2463,6 +2877,7 @@ User sees updated UI with line chart instead of cards.
 - Inspect returns generation metadata
 - Regenerate bypasses cache
 - Refresh tools detects added/removed/changed tools
+- **Edge cases**: Tool renamed, tool schema changed, tool removed while UI cached
 
 ### Phase 6: Integration & Polish (Week 5-6)
 
@@ -2471,6 +2886,7 @@ User sees updated UI with line chart instead of cards.
 - Handle startup sequence
 - Handle shutdown gracefully
 - Add health checks
+- Handle host capability detection failure
 
 **Files:**
 - `src/wrapper.ts` (main entry point)
@@ -2480,6 +2896,7 @@ User sees updated UI with line chart instead of cards.
 - Full startup/shutdown cycle
 - Proxy tool calls end-to-end
 - Generate and serve UI end-to-end
+- **Latency benchmarks**: Measure generation time, cache hit time
 
 #### Task 6.2: CLI Interface
 - Implement `mcp-gen-ui` command
@@ -2559,7 +2976,8 @@ mcp-gen-ui/
 │   ├── cli.ts                 # CLI implementation
 │   ├── config/
 │   │   ├── schema.ts          # Config type definitions
-│   │   └── loader.ts          # Config loading logic
+│   │   ├── loader.ts          # Config loading logic
+│   │   └── limits.ts          # Centralized limits
 │   ├── transport/
 │   │   ├── base.ts            # Transport interface
 │   │   ├── stdio.ts           # Stdio transport
@@ -2579,6 +2997,7 @@ mcp-gen-ui/
 │   │   ├── repair.ts          # HTML repair logic
 │   │   ├── prompt-manager.ts  # Prompt template handling
 │   │   ├── template-renderer.ts # Minimal UI template
+│   │   ├── result-renderer.ts # Shared result rendering
 │   │   └── prompts/
 │   │       ├── system.txt
 │   │       ├── generate.txt
@@ -2587,19 +3006,26 @@ mcp-gen-ui/
 │   │   ├── provider.ts        # Provider interface
 │   │   ├── anthropic.ts       # Anthropic implementation
 │   │   ├── openai.ts          # OpenAI implementation
-│   │   └── ollama.ts          # Ollama implementation
+│   │   ├── ollama.ts          # Ollama implementation
+│   │   └── queue.ts           # Generation queue
 │   ├── cache/
 │   │   ├── manager.ts         # Cache manager
 │   │   ├── keys.ts            # Cache key computation
 │   │   └── persistence.ts     # Filesystem persistence
 │   ├── refinement/
 │   │   └── manager.ts         # Refinement history
+│   ├── utils/
+│   │   └── canonical-json.ts  # Stable JSON serialization
 │   └── logging/
 │       ├── logger.ts          # Structured logger
-│       └── formatters.ts      # Log format handlers
+│       ├── formatters.ts      # Log format handlers
+│       ├── context.ts         # Correlation ID management
+│       └── redaction.ts       # Sensitive data redaction
 ├── tests/
 │   ├── unit/                  # Unit tests
 │   ├── integration/           # Integration tests
+│   ├── golden/                # Golden/snapshot tests for UI generation
+│   ├── security/              # Security-focused tests
 │   └── fixtures/              # Test fixtures
 ├── examples/
 │   ├── weather-server/        # Example server
@@ -2623,37 +3049,59 @@ mcp-gen-ui/
 |---------|------|--------|---------|
 | 1.0 | 2026-01-28 | Vivek Haldar | Initial design document |
 | 1.1 | 2026-01-28 | Vivek Haldar | Address design review feedback: security model clarification, cache key versioning, concurrency controls, correlation IDs, timeout handling, output schema limitations |
+| 1.2 | 2026-01-28 | Vivek Haldar | Address round 2 critique: cancellation/abort support, canonical JSON for cache keys, type coercion in forms, multiple content handling, JSON Schema constraints, tool allow-list, output heuristics, improved test coverage, centralized limits |
 
 ---
 
 ## Appendix C: Design Review Response Summary
 
-This section documents the response to the design review critique (v1.0 → v1.1).
+This section documents the response to design review critiques.
 
-### Critical Issues Addressed
+### Round 2 Critique Response (v1.1 → v1.2)
 
-| Issue | Response | Changes Made |
-|-------|----------|--------------|
-| Security model underspecified | AGREE | Added section 10.1 clarifying host sandbox is primary boundary; documented module resolution assumption; made inline handlers forbidden |
-| Output schema unavailable | AGREE | Added section 2.4 explicitly documenting this limitation; updated prompts to handle unknown output; added JSON fallback requirement |
-| Cache key missing config hash | AGREE | Updated 4.3.3 to include promptVersion, llmModel, systemPromptHash in cache keys |
-| Refinement not session-isolated | PARTIALLY AGREE | Clarified V1 is single-user; documented limitation in 1.4; noted for V2 |
-
-### High Severity Issues Addressed
+#### Completeness Issues
 
 | Issue | Response | Changes Made |
 |-------|----------|--------------|
-| Blocking can deadlock | AGREE | Added 15s hard timeout in 4.3.1; serve minimal UI on timeout |
-| Tool refresh underspecified | AGREE | Added refresh config in 5.2; added `_ui_refresh_tools` tool |
-| Validator regex limitations | PARTIALLY AGREE | Documented limitations in 8.5 and 10.4; noted V2 should use AST parser |
+| Tool output size/streaming | AGREE | Added maxOutputDisplayBytes limit, truncation with "show more" |
+| Multiple results in flight | AGREE | UIs now handle all content items, not just first |
+| Result shapes beyond text/image/error | PARTIALLY AGREE | JSON fallback handles unknown; documented content type policy |
+| Tool input constraints | AGREE | Added support for min/max/pattern/minLength/maxLength |
+| Schema defaults | AGREE | Added default value population in forms |
+| Cache on description changes | AGREE | tool_hash now includes description |
+| Template version in cache key | AGREE | Added templateVersion to config_hash |
+| Tool removal handling | AGREE | Documented behavior in 4.3.5 |
 
-### Medium Severity Issues Addressed
+#### Correctness Issues
 
 | Issue | Response | Changes Made |
 |-------|----------|--------------|
-| Schema rendering simplistic | AGREE | Added section 8.3 documenting supported JSON Schema subset and fallbacks |
-| Missing concurrency control | AGREE | Added GenerationQueue in 7.2.1; added maxConcurrentGenerations config |
-| Missing correlation IDs | AGREE | Added requestId to LogEntry in 11.1; propagation documented |
+| ext-apps availability | AGREE | Added host capability detection with pass-through mode |
+| Regex validation too weak | AGREE | Reframed as advisory; host sandbox is primary |
+| Type coercion bug | AGREE | Fixed template to do proper type coercion |
+| ontoolresult multiple items | AGREE | Updated template to iterate all content |
+| Schema hash stability | AGREE | Added canonical JSON serialization |
+| Retry exceeds timeout | AGREE | Implemented time budget across retries with AbortController |
+| GenerationQueue config inconsistency | AGREE | Consolidated into GenerationConfig |
+
+#### Security Issues
+
+| Issue | Response | Changes Made |
+|-------|----------|--------------|
+| Prompt injection | AGREE | Added output heuristics for contaminated content |
+| innerHTML with user data | AGREE | Templates now use textContent for safety |
+| Debug mode logging | AGREE | Added redaction option, warning in docs |
+
+#### Implementation Tasks
+
+| Issue | Response | Changes Made |
+|-------|----------|--------------|
+| Protocol complexity underestimated | AGREE | Expanded Phase 2 with message framing, partial buffer tests |
+| Vague UI generation tests | AGREE | Added golden/snapshot tests |
+| No cancellation support | AGREE | Added AbortController throughout |
+| No latency testing | AGREE | Added latency benchmarks to integration tasks |
+| No security testing | AGREE | Added security test directory |
+| No tool refresh edge case tests | AGREE | Added edge case tests for rename/change/remove |
 
 ### Deferred to V2
 
@@ -2662,4 +3110,5 @@ This section documents the response to the design review critique (v1.0 → v1.1
 | AST-based JS validation | Complexity vs. risk tradeoff; regex + host sandbox is sufficient for V1 |
 | Multi-user session isolation | V1 explicitly targets single-user exploration |
 | Internationalization | Out of scope for V1 MVP |
-| UI DSL instead of raw HTML | Good idea but significant complexity; evaluate after V1 usage data |
+| Output schema inference | Complexity, side effects risk; refinement provides escape hatch |
+| Streaming UI generation | MCP doesn't support streaming resources |
