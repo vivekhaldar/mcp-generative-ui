@@ -46,6 +46,99 @@ export async function createWrapperServer(
     { capabilities: {} }
   );
 
+  // Helper to add structuredContent for chatgpt-app-sim compatibility
+  // chatgpt-app-sim expects result.structuredContent but MCP returns result.content
+  function addStructuredContent(result: any): any {
+    if (!result || !result.content || !Array.isArray(result.content)) {
+      return result;
+    }
+
+    // Try to parse the first text content as JSON for structuredContent
+    for (const item of result.content) {
+      if (item.type === "text" && item.text) {
+        try {
+          const parsed = JSON.parse(item.text);
+          if (typeof parsed === "object" && parsed !== null) {
+            return {
+              ...result,
+              structuredContent: parsed,
+            };
+          }
+        } catch {
+          // Not JSON, continue
+        }
+      }
+    }
+
+    // Fallback: use content array as structuredContent
+    return {
+      ...result,
+      structuredContent: result.content,
+    };
+  }
+
+  // Helper to get sample output by calling the tool with minimal/sample input
+  async function getSampleOutput(toolName: string, tool: ToolDefinition): Promise<unknown | undefined> {
+    try {
+      // Build sample arguments from the input schema
+      const schema = tool.inputSchema as {
+        properties?: Record<string, { type?: string; default?: unknown; enum?: string[] }>;
+        required?: string[];
+      };
+      const properties = schema.properties || {};
+      const required = schema.required || [];
+
+      const sampleArgs: Record<string, unknown> = {};
+      for (const [name, prop] of Object.entries(properties)) {
+        // Only fill required fields with sample values
+        if (required.includes(name)) {
+          if (prop.default !== undefined) {
+            sampleArgs[name] = prop.default;
+          } else if (prop.enum && prop.enum.length > 0) {
+            sampleArgs[name] = prop.enum[0];
+          } else if (prop.type === "string") {
+            // Use a reasonable sample value based on the field name
+            if (name.toLowerCase().includes("city")) {
+              sampleArgs[name] = "New York";
+            } else if (name.toLowerCase().includes("symbol") || name.toLowerCase().includes("ticker")) {
+              sampleArgs[name] = "AAPL";
+            } else {
+              sampleArgs[name] = "sample";
+            }
+          } else if (prop.type === "number" || prop.type === "integer") {
+            sampleArgs[name] = 1;
+          } else if (prop.type === "boolean") {
+            sampleArgs[name] = true;
+          }
+        }
+      }
+
+      console.log(`Getting sample output for ${toolName} with args:`, sampleArgs);
+
+      // Call the tool
+      let result;
+      if (innerTools.has(toolName)) {
+        result = await upstreamClient.callTool({
+          name: "TOOL_CALL",
+          arguments: {
+            tool_name: toolName,
+            arguments: JSON.stringify(sampleArgs),
+          },
+        });
+      } else {
+        result = await upstreamClient.callTool({
+          name: toolName,
+          arguments: sampleArgs,
+        });
+      }
+
+      return result;
+    } catch (err) {
+      console.warn(`Failed to get sample output for ${toolName}:`, err);
+      return undefined;
+    }
+  }
+
   // Helper to generate or get cached UI
   async function getOrGenerateUI(toolName: string): Promise<string> {
     const tool = tools.get(toolName);
@@ -64,9 +157,14 @@ export async function createWrapperServer(
       return cached.html;
     }
 
-    // Generate
-    console.log(`Cache miss for ${toolName}, generating...`);
-    const { html } = await generator.generate(tool, history);
+    // Get sample output to help LLM generate better UI
+    console.log(`Cache miss for ${toolName}, getting sample output...`);
+    const sampleOutput = await getSampleOutput(toolName, tool);
+
+    // Generate with sample output
+    console.log(`Generating UI for ${toolName}...`);
+    const toolWithSample = { ...tool, sampleOutput };
+    const { html } = await generator.generate(toolWithSample, history);
 
     // Cache
     cache.set(toolName, schemaHash, refinementHash, html);
@@ -231,7 +329,7 @@ export async function createWrapperServer(
               arguments: JSON.stringify(args || {}),
             },
           });
-          return result;
+          return addStructuredContent(result);
         } catch (err) {
           return {
             content: [
@@ -251,7 +349,9 @@ export async function createWrapperServer(
           name,
           arguments: args || {},
         });
-        return result;
+        // Add structuredContent for chatgpt-app-sim compatibility
+        // It expects result.structuredContent but MCP returns result.content
+        return addStructuredContent(result);
       } catch (err) {
         return {
           content: [

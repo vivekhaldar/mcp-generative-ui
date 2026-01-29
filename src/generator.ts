@@ -8,10 +8,15 @@ const systemPrompt = `You are a UI generator for OpenAI Apps. Your task is to ge
 
 THE HOST PROVIDES window.openai GLOBAL:
 The host injects a window.openai object with these properties and methods:
-- window.openai.toolOutput - the tool result data (object with content array)
+- window.openai.toolOutput - the tool result data (ALREADY PARSED as JavaScript object, NOT wrapped in content array)
 - window.openai.toolInput - the input arguments used to call the tool
-- window.openai.callTool(name, args) - call another tool, returns Promise with result
+- window.openai.callTool(name, args) - call another tool, returns Promise with result containing structuredContent
 - window.openai.theme - "dark" or "light"
+
+CRITICAL - toolOutput FORMAT:
+- toolOutput is the PARSED data object directly, e.g., {city: "Boston", temperature: 53, condition: "Sunny"}
+- It is NOT wrapped in {content: [{type: "text", text: "..."}]} - the host already parsed it
+- Access fields directly: window.openai.toolOutput.temperature, window.openai.toolOutput.city, etc.
 
 CRITICAL CONSTRAINTS:
 - Do NOT import any external modules - use window.openai directly
@@ -67,6 +72,8 @@ INPUT SCHEMA:
 {{inputSchema}}
 ===TOOL_DEFINITION_END===
 
+{{sampleOutput}}
+
 {{refinements}}
 
 REQUIREMENTS:
@@ -78,20 +85,23 @@ REQUIREMENTS:
 - Show errors clearly with option to retry
 
 OUTPUT HANDLING (CRITICAL):
-- You do NOT have an output schema - the tool result structure is UNKNOWN
-- Based on the tool name and description, make a reasonable guess at visualization
-- For financial/stock data: consider using charts (canvas), tables, or card layouts
+- window.openai.toolOutput contains the ALREADY-PARSED data object directly
+- The sample output above shows the EXACT structure of toolOutput
+- Access fields directly: toolOutput.temperature, toolOutput.city, toolOutput.condition, etc.
+- DO NOT try to parse toolOutput.content or toolOutput.text - the data is ALREADY an object
+- Design your UI to display ALL fields from the sample output in a meaningful way
 - ALWAYS include a "Show Raw JSON" toggle as fallback
 - Wrap all rendering code in try/catch
-- If rendering fails, fall back to JSON.stringify(result, null, 2)
-- Handle ALL content items in the result, not just the first
+- If rendering fails, fall back to JSON.stringify(window.openai.toolOutput, null, 2)
 
-VISUALIZATION HINTS:
+VISUALIZATION GUIDANCE:
+- Weather data → show temperature prominently with weather icon/emoji, humidity, wind, conditions
 - Stock prices/trends → line chart or candlestick chart
 - Lists of items → table or cards
-- Single values → large display with label
+- Single numeric values → large display with label and unit
 - Time series → chart with x-axis as time
 - Comparisons → bar chart or table
+- Forecasts → card layout for each day
 
 Remember: Output ONLY the complete HTML file, no markdown code fences or explanations.`;
 
@@ -99,6 +109,7 @@ export interface ToolDefinition {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  sampleOutput?: unknown; // Sample output from calling the tool - helps LLM generate better UI
 }
 
 export interface GeneratorOptions {
@@ -120,6 +131,19 @@ export function createGenerator(options: GeneratorOptions) {
           .replace("{{toolName}}", tool.name)
           .replace("{{toolDescription}}", tool.description || "No description provided")
           .replace("{{inputSchema}}", JSON.stringify(tool.inputSchema, null, 2));
+
+        // Add sample output if available
+        if (tool.sampleOutput) {
+          const sampleText = `===SAMPLE_OUTPUT_START===
+This is a REAL example of what the tool returns:
+${JSON.stringify(tool.sampleOutput, null, 2)}
+===SAMPLE_OUTPUT_END===
+
+IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output.`;
+          userPrompt = userPrompt.replace("{{sampleOutput}}", sampleText);
+        } else {
+          userPrompt = userPrompt.replace("{{sampleOutput}}", "NOTE: No sample output available. Make a reasonable guess at the output structure based on the tool name and description.");
+        }
 
         // Add refinements if any
         if (refinements.length > 0) {
