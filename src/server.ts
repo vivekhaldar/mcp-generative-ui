@@ -14,6 +14,7 @@ import {
   computeRefinementHash,
 } from "./cache.js";
 import { createGenerator, type ToolDefinition } from "./generator.js";
+import { getStandardProfile } from "./standard.js";
 
 export interface WrapperServer {
   start(): Promise<void>;
@@ -33,12 +34,15 @@ export async function createWrapperServer(
   // Track which tools are "inner" tools that need to be proxied via TOOL_CALL
   const innerTools = new Set<string>();
 
+  // Resolve standard profile
+  const profile = getStandardProfile(config.standard);
+
   // Create cache
   const cache = createCache(config.cache.directory);
   cache.load();
 
   // Create generator
-  const generator = createGenerator({ llm });
+  const generator = createGenerator({ llm, standard: config.standard });
 
   // Create upstream client
   const upstreamClient = new Client(
@@ -139,6 +143,11 @@ export async function createWrapperServer(
     }
   }
 
+  // Cache key prefix to prevent cross-standard cache hits
+  function cacheToolName(toolName: string): string {
+    return `${config.standard}:${toolName}`;
+  }
+
   // Helper to generate or get cached UI
   async function getOrGenerateUI(toolName: string): Promise<string> {
     const tool = tools.get(toolName);
@@ -150,8 +159,9 @@ export async function createWrapperServer(
     const history = refinements.get(toolName) || [];
     const refinementHash = computeRefinementHash(history);
 
-    // Check cache
-    const cached = cache.get(toolName, schemaHash, refinementHash);
+    // Check cache (prefixed with standard to avoid cross-standard hits)
+    const cName = cacheToolName(toolName);
+    const cached = cache.get(cName, schemaHash, refinementHash);
     if (cached) {
       console.log(`Cache hit for ${toolName}`);
       return cached.html;
@@ -167,7 +177,7 @@ export async function createWrapperServer(
     const { html } = await generator.generate(toolWithSample, history);
 
     // Cache
-    cache.set(toolName, schemaHash, refinementHash, html);
+    cache.set(cName, schemaHash, refinementHash, html);
 
     return html;
   }
@@ -194,53 +204,51 @@ export async function createWrapperServer(
         name: tool.name,
         description: tool.description,
         inputSchema: tool.inputSchema,
-        _meta: {
-          "openai/outputTemplate": `ui://${tool.name}`,
-          "openai/widgetAccessible": true,
-        },
+        _meta: profile.buildToolMeta(`${profile.uriPrefix}${tool.name}`),
       }));
 
       // Add wrapper tools
-      toolList.push({
-        name: "_ui_refine",
-        description:
-          "Refine the generated UI for a tool based on natural language feedback",
-        inputSchema: {
-          type: "object",
-          properties: {
-            toolName: {
-              type: "string",
-              description: "Name of the tool whose UI to refine",
+      toolList.push(
+        {
+          name: "_ui_refine",
+          description:
+            "Refine the generated UI for a tool based on natural language feedback",
+          inputSchema: {
+            type: "object",
+            properties: {
+              toolName: {
+                type: "string",
+                description: "Name of the tool whose UI to refine",
+              },
+              feedback: {
+                type: "string",
+                description: "Natural language description of desired changes",
+              },
             },
-            feedback: {
-              type: "string",
-              description: "Natural language description of desired changes",
-            },
+            required: ["toolName", "feedback"],
           },
-          required: ["toolName", "feedback"],
-        },
-      });
-
-      toolList.push({
-        name: "_ui_regenerate",
-        description:
-          "Force regeneration of the UI for a tool, ignoring the cache",
-        inputSchema: {
-          type: "object",
-          properties: {
-            toolName: {
-              type: "string",
-              description: "Name of the tool to regenerate UI for",
+        } as any,
+        {
+          name: "_ui_regenerate",
+          description:
+            "Force regeneration of the UI for a tool, ignoring the cache",
+          inputSchema: {
+            type: "object",
+            properties: {
+              toolName: {
+                type: "string",
+                description: "Name of the tool to regenerate UI for",
+              },
+              clearRefinements: {
+                type: "boolean",
+                description: "If true, also clear refinement history",
+                default: false,
+              },
             },
-            clearRefinements: {
-              type: "boolean",
-              description: "If true, also clear refinement history",
-              default: false,
-            },
+            required: ["toolName"],
           },
-          required: ["toolName"],
-        },
-      });
+        } as any,
+      );
 
       return { tools: toolList };
     }
@@ -266,7 +274,7 @@ export async function createWrapperServer(
         refinements.set(toolName, history);
 
         // Invalidate cache
-        cache.invalidate(toolName);
+        cache.invalidate(cacheToolName(toolName));
 
         return {
           content: [
@@ -295,7 +303,7 @@ export async function createWrapperServer(
         }
 
         // Invalidate cache
-        cache.invalidate(toolName);
+        cache.invalidate(cacheToolName(toolName));
 
         // Generate immediately
         const tool = tools.get(toolName)!;
@@ -307,7 +315,7 @@ export async function createWrapperServer(
         // Cache the result
         const schemaHash = computeSchemaHash(tool.inputSchema);
         const refinementHash = computeRefinementHash(history);
-        cache.set(tool.name, schemaHash, refinementHash, html);
+        cache.set(cacheToolName(tool.name), schemaHash, refinementHash, html);
 
         return {
           content: [
@@ -329,7 +337,7 @@ export async function createWrapperServer(
               arguments: JSON.stringify(args || {}),
             },
           });
-          return addStructuredContent(result);
+          return profile.useStructuredContent ? addStructuredContent(result) : result;
         } catch (err) {
           return {
             content: [
@@ -349,9 +357,7 @@ export async function createWrapperServer(
           name,
           arguments: args || {},
         });
-        // Add structuredContent for chatgpt-app-sim compatibility
-        // It expects result.structuredContent but MCP returns result.content
-        return addStructuredContent(result);
+        return profile.useStructuredContent ? addStructuredContent(result) : result;
       } catch (err) {
         return {
           content: [
@@ -367,10 +373,10 @@ export async function createWrapperServer(
 
     if (method === "resources/list") {
       const resources = Array.from(tools.values()).map((tool) => ({
-        uri: `ui://${tool.name}`,
+        uri: `${profile.uriPrefix}${tool.name}`,
         name: `${tool.name} UI`,
         description: `Generated interactive UI for ${tool.name}`,
-        mimeType: "text/html",
+        mimeType: profile.mimeType,
       }));
 
       return { resources };
@@ -379,18 +385,18 @@ export async function createWrapperServer(
     if (method === "resources/read") {
       const uri = params.uri;
 
-      if (!uri.startsWith("ui://")) {
+      if (!uri.startsWith(profile.uriPrefix)) {
         throw new Error(`Invalid resource URI: ${uri}`);
       }
 
-      const toolName = uri.slice(5); // Remove "ui://"
+      const toolName = uri.slice(profile.uriPrefix.length);
       const html = await getOrGenerateUI(toolName);
 
       return {
         contents: [
           {
             uri,
-            mimeType: "text/html",
+            mimeType: profile.mimeType,
             text: html,
           },
         ],

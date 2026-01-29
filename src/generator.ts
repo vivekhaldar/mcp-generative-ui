@@ -2,67 +2,34 @@
 // ABOUTME: Generates HTML UIs for MCP tools and provides minimal fallback on failure.
 
 import type { LLMClient } from "./llm.js";
+import { getStandardProfile, type StandardName, type StandardProfile } from "./standard.js";
 
-// Embedded prompts (to work after bundling)
-const systemPrompt = `You are a UI generator for OpenAI Apps. Your task is to generate a complete, self-contained HTML file that provides an interactive interface for an MCP tool.
+// Generation prompt template (standard-agnostic)
+// The system prompt is provided by the StandardProfile.
 
-THE HOST PROVIDES window.openai GLOBAL:
-The host injects a window.openai object with these properties and methods:
-- window.openai.toolOutput - the tool result data (ALREADY PARSED as JavaScript object, NOT wrapped in content array)
-- window.openai.toolInput - the input arguments used to call the tool
-- window.openai.callTool(name, args) - call another tool, returns Promise with result containing structuredContent
-- window.openai.theme - "dark" or "light"
-
-CRITICAL - toolOutput FORMAT:
-- toolOutput is the PARSED data object directly, e.g., {city: "Boston", temperature: 53, condition: "Sunny"}
-- It is NOT wrapped in {content: [{type: "text", text: "..."}]} - the host already parsed it
-- Access fields directly: window.openai.toolOutput.temperature, window.openai.toolOutput.city, etc.
-
-CRITICAL CONSTRAINTS:
-- Do NOT import any external modules - use window.openai directly
-- Do NOT use inline event handlers (onclick=, onsubmit=, etc.) - use addEventListener only
-- Do NOT include any external scripts or stylesheets (except CDN for charts if needed)
-- Do NOT use eval(), new Function(), or document.write()
-- Do NOT use innerHTML with user data - use textContent for safety
-- Use <script> NOT <script type="module"> since there are no imports
-
-REQUIREMENTS:
-1. Output a single HTML file with inline <style> and <script>
-2. Wait for window.openai to be available before accessing it
-3. Read initial data from window.openai.toolOutput and window.openai.toolInput
-4. Use window.openai.callTool(name, args) to call tools, await the returned Promise
-5. Include error handling with try/catch and display errors to users
-6. Style should be clean, functional, and use system fonts
-7. The UI must be fully functional without any TODO comments or placeholders
-8. Include proper form labels (for accessibility)
-
-IMPORTANT - OUTPUT HANDLING:
-- window.openai.toolOutput may be null/undefined initially
-- The result from callTool() is the raw tool result (not wrapped)
+const openaiOutputHandling = `OUTPUT HANDLING (CRITICAL):
+- window.openai.toolOutput contains the ALREADY-PARSED data object directly
+- The sample output above shows the EXACT structure of toolOutput
+- Access fields directly: toolOutput.temperature, toolOutput.city, toolOutput.condition, etc.
+- DO NOT try to parse toolOutput.content or toolOutput.text - the data is ALREADY an object
+- Design your UI to display ALL fields from the sample output in a meaningful way
 - ALWAYS include a "Show Raw JSON" toggle as fallback
-- Wrap all rendering in try/catch - if parsing/rendering fails, show raw JSON
-- The result.content is an array of {type: "text", text: "..."} objects
-- Results may be arrays or objects - handle both
-- Truncate very large outputs (>100KB) with "Show more" option
+- Wrap all rendering code in try/catch
+- If rendering fails, fall back to JSON.stringify(window.openai.toolOutput, null, 2)`;
 
-IMPORTANT - INPUT HANDLING:
-- Coerce form values to correct types (boolean, number, integer)
-- Respect JSON Schema constraints when possible (min, max, pattern)
-- Pre-fill default values from schema
+const mcpAppsOutputHandling = `OUTPUT HANDLING (CRITICAL):
+- Tool results arrive via app.ontoolresult callback as {content: [{type: "text", text: "..."}]}
+- Parse the text content as JSON to get the data object
+- The sample output above shows the EXACT data structure inside result.content[0].text
+- Design your UI to display ALL fields from the sample output in a meaningful way
+- ALWAYS include a "Show Raw JSON" toggle as fallback
+- Wrap all rendering code in try/catch
+- If rendering fails, fall back to showing raw JSON`;
 
-PATTERN TO WAIT FOR window.openai:
-function init() {
-  if (!window.openai) {
-    window.addEventListener('openai:set-globals', init);
-    return;
-  }
-  // Your initialization code here
-}
-init();
+function getGenerateTemplate(profileName: StandardName): string {
+  const outputHandling = profileName === "openai" ? openaiOutputHandling : mcpAppsOutputHandling;
 
-OUTPUT ONLY THE HTML FILE. No markdown, no explanation, no code fences.`;
-
-const generateTemplate = `Generate a UI for this MCP tool:
+  return `Generate a UI for this MCP tool:
 
 ===TOOL_DEFINITION_START===
 TOOL NAME: {{toolName}}
@@ -84,15 +51,7 @@ REQUIREMENTS:
 - Add loading state while tool is executing
 - Show errors clearly with option to retry
 
-OUTPUT HANDLING (CRITICAL):
-- window.openai.toolOutput contains the ALREADY-PARSED data object directly
-- The sample output above shows the EXACT structure of toolOutput
-- Access fields directly: toolOutput.temperature, toolOutput.city, toolOutput.condition, etc.
-- DO NOT try to parse toolOutput.content or toolOutput.text - the data is ALREADY an object
-- Design your UI to display ALL fields from the sample output in a meaningful way
-- ALWAYS include a "Show Raw JSON" toggle as fallback
-- Wrap all rendering code in try/catch
-- If rendering fails, fall back to JSON.stringify(window.openai.toolOutput, null, 2)
+${outputHandling}
 
 VISUALIZATION GUIDANCE:
 - Weather data → show temperature prominently with weather icon/emoji, humidity, wind, conditions
@@ -104,6 +63,7 @@ VISUALIZATION GUIDANCE:
 - Forecasts → card layout for each day
 
 Remember: Output ONLY the complete HTML file, no markdown code fences or explanations.`;
+}
 
 export interface ToolDefinition {
   name: string;
@@ -114,11 +74,13 @@ export interface ToolDefinition {
 
 export interface GeneratorOptions {
   llm: LLMClient;
+  standard?: StandardName;
   timeoutMs?: number;
 }
 
 export function createGenerator(options: GeneratorOptions) {
-  const { llm, timeoutMs = 30000 } = options;
+  const { llm, standard = "mcp-apps", timeoutMs = 30000 } = options;
+  const profile = getStandardProfile(standard);
 
   return {
     async generate(
@@ -127,7 +89,7 @@ export function createGenerator(options: GeneratorOptions) {
     ): Promise<{ html: string; isMinimal: boolean }> {
       try {
         // Build the user prompt
-        let userPrompt = generateTemplate
+        let userPrompt = getGenerateTemplate(profile.name)
           .replace("{{toolName}}", tool.name)
           .replace("{{toolDescription}}", tool.description || "No description provided")
           .replace("{{inputSchema}}", JSON.stringify(tool.inputSchema, null, 2));
@@ -160,7 +122,7 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
         const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
         try {
-          const html = await llm.generate(systemPrompt, userPrompt);
+          const html = await llm.generate(profile.systemPrompt, userPrompt);
 
           // Strip markdown code fences if present
           let cleanHtml = html.trim();
@@ -175,8 +137,8 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
           cleanHtml = cleanHtml.trim();
 
           // Basic validation
-          if (!cleanHtml.includes("<html") || !cleanHtml.includes("window.openai")) {
-            console.warn("Generated HTML appears invalid, using minimal UI");
+          if (!cleanHtml.includes("<html") || !cleanHtml.includes(profile.validationMarker)) {
+            console.warn(`Generated HTML appears invalid (missing "${profile.validationMarker}"), using minimal UI`);
             return { html: this.minimalUI(tool), isMinimal: true };
           }
 
@@ -192,6 +154,13 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
     },
 
     minimalUI(tool: ToolDefinition): string {
+      if (profile.name === "mcp-apps") {
+        return this.minimalMcpAppsUI(tool);
+      }
+      return this.minimalOpenaiUI(tool);
+    },
+
+    minimalOpenaiUI(tool: ToolDefinition): string {
       const schema = tool.inputSchema as {
         properties?: Record<string, { type?: string; description?: string; default?: unknown; enum?: string[] }>;
         required?: string[];
@@ -437,6 +406,253 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
     }
 
     init();
+  </script>
+</body>
+</html>`;
+    },
+
+    minimalMcpAppsUI(tool: ToolDefinition): string {
+      const schema = tool.inputSchema as {
+        properties?: Record<string, { type?: string; description?: string; default?: unknown; enum?: string[] }>;
+        required?: string[];
+      };
+      const properties = schema.properties || {};
+      const required = schema.required || [];
+
+      // Generate form fields (same structure as OpenAI variant)
+      const formFields = Object.entries(properties)
+        .map(([name, prop]) => {
+          const isRequired = required.includes(name);
+          const requiredAttr = isRequired ? "required" : "";
+          const requiredClass = isRequired ? 'class="required"' : "";
+          const defaultValue = prop.default !== undefined ? `value="${prop.default}"` : "";
+
+          if (prop.enum) {
+            const options = prop.enum
+              .map((v) => `<option value="${v}">${v}</option>`)
+              .join("");
+            return `
+              <div class="form-group">
+                <label for="${name}" ${requiredClass}>${name}</label>
+                <select id="${name}" name="${name}" ${requiredAttr}>
+                  <option value="">-- Select --</option>
+                  ${options}
+                </select>
+              </div>`;
+          }
+
+          if (prop.type === "boolean") {
+            return `
+              <div class="form-group">
+                <label for="${name}" ${requiredClass}>${name}</label>
+                <select id="${name}" name="${name}" ${requiredAttr}>
+                  <option value="">-- Select --</option>
+                  <option value="true">Yes</option>
+                  <option value="false">No</option>
+                </select>
+              </div>`;
+          }
+
+          if (prop.type === "number" || prop.type === "integer") {
+            const step = prop.type === "integer" ? 'step="1"' : 'step="any"';
+            return `
+              <div class="form-group">
+                <label for="${name}" ${requiredClass}>${name}</label>
+                <input type="number" id="${name}" name="${name}" ${step} ${defaultValue} ${requiredAttr}
+                  placeholder="${prop.description || ""}">
+              </div>`;
+          }
+
+          return `
+            <div class="form-group">
+              <label for="${name}" ${requiredClass}>${name}</label>
+              <input type="text" id="${name}" name="${name}" ${defaultValue} ${requiredAttr}
+                placeholder="${prop.description || ""}">
+            </div>`;
+        })
+        .join("\n");
+
+      return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${tool.name}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      padding: 20px;
+      max-width: 600px;
+      margin: 0 auto;
+      line-height: 1.5;
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 4px 0; }
+    .description { color: #666; font-size: 0.875rem; margin-bottom: 20px; }
+    .form-group { margin-bottom: 16px; }
+    label {
+      display: block;
+      font-weight: 500;
+      font-size: 0.875rem;
+      margin-bottom: 4px;
+    }
+    .required::after { content: " *"; color: #c00; }
+    input, textarea, select {
+      width: 100%;
+      padding: 8px 12px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 0.875rem;
+    }
+    input:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: #007bff;
+      box-shadow: 0 0 0 2px rgba(0,123,255,0.15);
+    }
+    button {
+      background: #007bff;
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 6px;
+      font-size: 0.875rem;
+      font-weight: 500;
+      cursor: pointer;
+    }
+    button:hover { background: #0056b3; }
+    button:disabled { background: #ccc; cursor: not-allowed; }
+    .result {
+      margin-top: 20px;
+      padding: 16px;
+      background: #f8f9fa;
+      border-radius: 6px;
+      border: 1px solid #e9ecef;
+    }
+    .result pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 0.8125rem;
+    }
+    .error {
+      display: none;
+      margin-top: 16px;
+      padding: 12px 16px;
+      background: #fee;
+      border: 1px solid #fcc;
+      border-radius: 6px;
+      color: #c00;
+      font-size: 0.875rem;
+    }
+    .loading {
+      display: none;
+      margin-top: 16px;
+      color: #666;
+      font-size: 0.875rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>${tool.name}</h1>
+  <p class="description">${tool.description || "No description"}</p>
+
+  <form id="tool-form">
+    ${formFields}
+    <button type="submit" id="submit-btn">Execute</button>
+  </form>
+
+  <div class="loading" id="loading">Executing...</div>
+  <div class="error" id="error"></div>
+  <div class="result" id="result" style="display: none;">
+    <strong>Result:</strong>
+    <pre id="result-content"></pre>
+  </div>
+
+  <script type="module">
+    import { App } from "@modelcontextprotocol/ext-apps";
+
+    var schema = ${JSON.stringify(tool.inputSchema)};
+    var toolName = "${tool.name}";
+
+    var app = new App({ name: toolName, description: "${(tool.description || "").replace(/"/g, '\\"')}" });
+
+    window.onerror = function(msg) {
+      document.getElementById('error').textContent = String(msg);
+      document.getElementById('error').style.display = 'block';
+      document.getElementById('loading').style.display = 'none';
+    };
+
+    function renderResult(result) {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('error').style.display = 'none';
+      document.getElementById('result').style.display = 'block';
+      document.getElementById('submit-btn').disabled = false;
+
+      try {
+        var content = result.content || [];
+        var output = '';
+        for (var i = 0; i < content.length; i++) {
+          var item = content[i];
+          if (item.type === 'text' && item.text) {
+            try {
+              var parsed = JSON.parse(item.text);
+              output += JSON.stringify(parsed, null, 2) + '\\n';
+            } catch (e) {
+              output += item.text + '\\n';
+            }
+          }
+        }
+        document.getElementById('result-content').textContent = output || JSON.stringify(result, null, 2);
+      } catch (e) {
+        document.getElementById('result-content').textContent = JSON.stringify(result, null, 2);
+      }
+    }
+
+    app.ontoolresult = function(result) {
+      renderResult(result);
+    };
+
+    document.getElementById('tool-form').addEventListener('submit', function(e) {
+      e.preventDefault();
+      var formData = new FormData(e.target);
+      var args = {};
+
+      formData.forEach(function(value, key) {
+        if (value === '') return;
+        var propSchema = schema.properties && schema.properties[key];
+        if (propSchema) {
+          if (propSchema.type === 'boolean') {
+            args[key] = value === 'true';
+          } else if (propSchema.type === 'integer') {
+            args[key] = parseInt(value, 10);
+          } else if (propSchema.type === 'number') {
+            args[key] = parseFloat(value);
+          } else {
+            args[key] = value;
+          }
+        } else {
+          args[key] = value;
+        }
+      });
+
+      document.getElementById('loading').style.display = 'block';
+      document.getElementById('error').style.display = 'none';
+      document.getElementById('result').style.display = 'none';
+      document.getElementById('submit-btn').disabled = true;
+
+      app.callServerTool({ name: toolName, arguments: args })
+        .then(function(result) {
+          renderResult(result);
+        })
+        .catch(function(err) {
+          document.getElementById('loading').style.display = 'none';
+          document.getElementById('error').textContent = err.message || 'Tool execution failed';
+          document.getElementById('error').style.display = 'block';
+          document.getElementById('submit-btn').disabled = false;
+        });
+    });
+
+    await app.connect();
   </script>
 </body>
 </html>`;

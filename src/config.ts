@@ -1,6 +1,8 @@
 // ABOUTME: Configuration parsing from CLI args and environment variables.
 // ABOUTME: Defines the WrapperConfig interface and buildConfig function.
 
+import type { StandardName } from "./standard.js";
+
 export interface WrapperConfig {
   // Upstream server connection
   upstream:
@@ -20,6 +22,9 @@ export interface WrapperConfig {
     directory: string;
   };
 
+  // UI standard
+  standard: StandardName;
+
   // Server configuration
   server: {
     port: number;
@@ -35,6 +40,7 @@ export interface CLIOptions {
   apiKey?: string;
   cacheDir?: string;
   port?: number;
+  standard?: string;
 }
 
 export function buildConfig(options: CLIOptions): WrapperConfig {
@@ -88,6 +94,13 @@ export function buildConfig(options: CLIOptions): WrapperConfig {
     process.env.MCP_GEN_UI_CACHE_DIR ||
     ".mcp-gen-ui-cache";
 
+  // UI standard
+  const standardInput = options.standard || "mcp-apps";
+  if (standardInput !== "openai" && standardInput !== "mcp-apps") {
+    throw new Error(`Invalid standard: ${standardInput}. Must be "openai" or "mcp-apps".`);
+  }
+  const standard: StandardName = standardInput;
+
   // Server port
   const port = options.port || 8000;
 
@@ -101,6 +114,7 @@ export function buildConfig(options: CLIOptions): WrapperConfig {
     cache: {
       directory: cacheDir,
     },
+    standard,
     server: {
       port,
     },

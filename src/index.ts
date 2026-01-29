@@ -18,6 +18,7 @@ program
   .option("--model <model>", "LLM model to use")
   .option("--api-key <key>", "LLM API key (or use ANTHROPIC_API_KEY/OPENAI_API_KEY env)")
   .option("--cache-dir <dir>", "Cache directory", ".mcp-gen-ui-cache")
+  .option("--standard <standard>", "UI standard: openai or mcp-apps", "mcp-apps")
   .option("--port <port>", "Server port (for HTTP mode)", "8000")
   .parse();
 
@@ -33,6 +34,7 @@ async function main() {
       model: options.model,
       apiKey: options.apiKey,
       cacheDir: options.cacheDir,
+      standard: options.standard,
       port: parseInt(options.port, 10),
     });
 
@@ -40,6 +42,7 @@ async function main() {
     console.log(`  Upstream: ${config.upstream.transport === "stdio" ? config.upstream.command : config.upstream.url}`);
     console.log(`  LLM: ${config.llm.provider} (${config.llm.model || "default model"})`);
     console.log(`  Cache: ${config.cache.directory}`);
+    console.log(`  Standard: ${config.standard}`);
 
     const llm = createLLMClient(config.llm);
     const server = await createWrapperServer(config, llm);
