@@ -1,0 +1,33 @@
+{
+  "name": "mcp-gen-ui",
+  "version": "0.1.0",
+  "description": "MCP wrapper that auto-generates interactive UIs for tools using LLM",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-gen-ui": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --external:@anthropic-ai/sdk --external:openai --external:@ai-sdk/anthropic --external:@ai-sdk/openai --external:commander",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "ai": "^4.0.0",
+    "@ai-sdk/anthropic": "^1.0.0",
+    "@ai-sdk/openai": "^1.0.0",
+    "commander": "^12.0.0",
+    "eventsource": "^2.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/eventsource": "^1.1.15",
+    "esbuild": "^0.20.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0",
+    "vitest": "^1.3.0"
+  }
+}
