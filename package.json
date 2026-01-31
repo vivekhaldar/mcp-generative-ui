@@ -2,6 +2,7 @@
   "name": "mcp-gen-ui",
   "version": "0.1.0",
   "description": "MCP wrapper that auto-generates interactive UIs for tools using LLM",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
