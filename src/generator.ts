@@ -88,6 +88,14 @@ STATUS/BOOLEAN (health checks, flags):
 
 ALWAYS: Use icons/emoji for categories, color for status, bold for key values.
 
+DATA HANDLING PITFALLS:
+- Time series data: ALWAYS sort by date ascending (oldest first, newest last) for charts.
+  Never reverse chronological data for chart display — the X-axis should go left (old) to right (new).
+- Percentage values: Financial APIs often return percentages as decimals (e.g., 0.0025 = 0.25%).
+  Check the sample output to determine if values are already percentages or need conversion.
+  If a "yield" or "margin" value is < 1 in the sample data, it's likely already a ratio — multiply by 100.
+  If it's already > 1 (like 25.5), it's already a percentage — do NOT multiply by 100.
+
 Remember: Output ONLY the complete HTML file, no markdown code fences or explanations.`;
 }
 
