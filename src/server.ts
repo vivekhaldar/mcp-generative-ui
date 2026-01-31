@@ -1,10 +1,16 @@
 // ABOUTME: MCP server wrapper that proxies tools and serves generated UIs.
 // ABOUTME: Connects to upstream server, adds ui:// resources, handles refinement.
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport, SSEClientTransport, HttpClientTransport } from "./transport/base.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import type { WrapperConfig } from "./config.js";
 import type { LLMClient } from "./llm.js";
@@ -51,7 +57,7 @@ export async function createWrapperServer(
   );
 
   // Helper to add structuredContent for chatgpt-app-sim compatibility
-  // chatgpt-app-sim expects result.structuredContent but MCP returns result.content
+  // chatgpt-app-sim expects result.structuredContent as a plain object (not array)
   function addStructuredContent(result: any): any {
     if (!result || !result.content || !Array.isArray(result.content)) {
       return result;
@@ -63,9 +69,13 @@ export async function createWrapperServer(
         try {
           const parsed = JSON.parse(item.text);
           if (typeof parsed === "object" && parsed !== null) {
+            // structuredContent must be a plain object, not an array
+            const structured = Array.isArray(parsed)
+              ? { result: parsed }
+              : parsed;
             return {
               ...result,
-              structuredContent: parsed,
+              structuredContent: structured,
             };
           }
         } catch {
@@ -74,10 +84,16 @@ export async function createWrapperServer(
       }
     }
 
-    // Fallback: use content array as structuredContent
+    // Fallback: concatenate all text content into a single object
+    const texts: string[] = [];
+    for (const item of result.content) {
+      if (item.type === "text" && item.text) {
+        texts.push(item.text);
+      }
+    }
     return {
       ...result,
-      structuredContent: result.content,
+      structuredContent: { result: texts.length === 1 ? texts[0] : texts },
     };
   }
 
@@ -143,6 +159,21 @@ export async function createWrapperServer(
     }
   }
 
+  // Build the full resource URI for a tool
+  function buildResourceUri(toolName: string): string {
+    return `${profile.uriPrefix}${toolName}${profile.uriSuffix}`;
+  }
+
+  // Extract tool name from a resource URI
+  function extractToolName(uri: string): string | null {
+    if (!uri.startsWith(profile.uriPrefix)) return null;
+    let name = uri.slice(profile.uriPrefix.length);
+    if (profile.uriSuffix && name.endsWith(profile.uriSuffix)) {
+      name = name.slice(0, -profile.uriSuffix.length);
+    }
+    return name;
+  }
+
   // Cache key prefix to prevent cross-standard cache hits
   function cacheToolName(toolName: string): string {
     return `${config.standard}:${toolName}`;
@@ -182,32 +213,17 @@ export async function createWrapperServer(
     return html;
   }
 
-  // Handle JSON-RPC request
-  async function handleRequest(method: string, params: any): Promise<any> {
-    if (method === "initialize") {
-      return {
-        protocolVersion: "2024-11-05",
-        serverInfo: { name: "mcp-gen-ui", version: "0.1.0" },
-        capabilities: {
-          tools: { list: true, call: true },
-          resources: { list: true, read: true },
-        },
-      };
-    }
+  // Build tool list response for tools/list handler
+  function buildToolList() {
+    const toolList = Array.from(tools.values()).map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      _meta: profile.buildToolMeta(buildResourceUri(tool.name)),
+    }));
 
-    if (method === "notifications/initialized") {
-      return {};
-    }
-
-    if (method === "tools/list") {
-      const toolList = Array.from(tools.values()).map((tool) => ({
-        name: tool.name,
-        description: tool.description,
-        inputSchema: tool.inputSchema,
-        _meta: profile.buildToolMeta(`${profile.uriPrefix}${tool.name}`),
-      }));
-
-      // Add wrapper tools
+    // Add wrapper tools (only for mcp-apps standard; openai requires outputTemplate on all tools)
+    if (config.standard !== "openai") {
       toolList.push(
         {
           name: "_ui_refine",
@@ -249,113 +265,86 @@ export async function createWrapperServer(
           },
         } as any,
       );
-
-      return { tools: toolList };
     }
 
-    if (method === "tools/call") {
-      const { name, arguments: args } = params;
+    return toolList;
+  }
 
-      // Handle wrapper tools
-      if (name === "_ui_refine") {
-        const toolName = args?.toolName as string;
-        const feedback = args?.feedback as string;
+  // Handle tool call
+  async function handleToolCall(name: string, args: Record<string, unknown> | undefined) {
+    // Handle wrapper tools
+    if (name === "_ui_refine") {
+      const toolName = args?.toolName as string;
+      const feedback = args?.feedback as string;
 
-        if (!tools.has(toolName)) {
-          return {
-            content: [{ type: "text", text: `Tool not found: ${toolName}` }],
-            isError: true,
-          };
-        }
-
-        // Add refinement
-        const history = refinements.get(toolName) || [];
-        history.push(feedback);
-        refinements.set(toolName, history);
-
-        // Invalidate cache
-        cache.invalidate(cacheToolName(toolName));
-
+      if (!tools.has(toolName)) {
         return {
-          content: [
-            {
-              type: "text",
-              text: `UI refinement queued for tool '${toolName}'. The updated UI will be available on next resource request.`,
-            },
-          ],
+          content: [{ type: "text", text: `Tool not found: ${toolName}` }],
+          isError: true,
         };
       }
 
-      if (name === "_ui_regenerate") {
-        const toolName = args?.toolName as string;
-        const clearRefinements = args?.clearRefinements as boolean;
+      const history = refinements.get(toolName) || [];
+      history.push(feedback);
+      refinements.set(toolName, history);
+      cache.invalidate(cacheToolName(toolName));
 
-        if (!tools.has(toolName)) {
-          return {
-            content: [{ type: "text", text: `Tool not found: ${toolName}` }],
-            isError: true,
-          };
-        }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `UI refinement queued for tool '${toolName}'. The updated UI will be available on next resource request.`,
+          },
+        ],
+      };
+    }
 
-        // Clear refinements if requested
-        if (clearRefinements) {
-          refinements.delete(toolName);
-        }
+    if (name === "_ui_regenerate") {
+      const toolName = args?.toolName as string;
+      const clearRefinementsFlag = args?.clearRefinements as boolean;
 
-        // Invalidate cache
-        cache.invalidate(cacheToolName(toolName));
-
-        // Generate immediately
-        const tool = tools.get(toolName)!;
-        const history = refinements.get(toolName) || [];
-        const start = Date.now();
-        const { html } = await generator.generate(tool, history);
-        const elapsed = Date.now() - start;
-
-        // Cache the result
-        const schemaHash = computeSchemaHash(tool.inputSchema);
-        const refinementHash = computeRefinementHash(history);
-        cache.set(cacheToolName(tool.name), schemaHash, refinementHash, html);
-
+      if (!tools.has(toolName)) {
         return {
-          content: [
-            {
-              type: "text",
-              text: `UI regenerated for tool '${toolName}'. Generation took ${elapsed}ms.`,
-            },
-          ],
+          content: [{ type: "text", text: `Tool not found: ${toolName}` }],
+          isError: true,
         };
       }
 
-      // Check if this is an inner tool that needs to be proxied via TOOL_CALL
-      if (innerTools.has(name)) {
-        try {
-          const result = await upstreamClient.callTool({
-            name: "TOOL_CALL",
-            arguments: {
-              tool_name: name,
-              arguments: JSON.stringify(args || {}),
-            },
-          });
-          return profile.useStructuredContent ? addStructuredContent(result) : result;
-        } catch (err) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Tool call failed: ${err instanceof Error ? err.message : String(err)}`,
-              },
-            ],
-            isError: true,
-          };
-        }
+      if (clearRefinementsFlag) {
+        refinements.delete(toolName);
       }
 
-      // Proxy to upstream directly
+      cache.invalidate(cacheToolName(toolName));
+
+      const tool = tools.get(toolName)!;
+      const history = refinements.get(toolName) || [];
+      const start = Date.now();
+      const { html } = await generator.generate(tool, history);
+      const elapsed = Date.now() - start;
+
+      const schemaHash = computeSchemaHash(tool.inputSchema);
+      const refinementHash = computeRefinementHash(history);
+      cache.set(cacheToolName(tool.name), schemaHash, refinementHash, html);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `UI regenerated for tool '${toolName}'. Generation took ${elapsed}ms.`,
+          },
+        ],
+      };
+    }
+
+    // Proxy inner tools via TOOL_CALL
+    if (innerTools.has(name)) {
       try {
         const result = await upstreamClient.callTool({
-          name,
-          arguments: args || {},
+          name: "TOOL_CALL",
+          arguments: {
+            tool_name: name,
+            arguments: JSON.stringify(args || {}),
+          },
         });
         return profile.useStructuredContent ? addStructuredContent(result) : result;
       } catch (err) {
@@ -371,42 +360,28 @@ export async function createWrapperServer(
       }
     }
 
-    if (method === "resources/list") {
-      const resources = Array.from(tools.values()).map((tool) => ({
-        uri: `${profile.uriPrefix}${tool.name}`,
-        name: `${tool.name} UI`,
-        description: `Generated interactive UI for ${tool.name}`,
-        mimeType: profile.mimeType,
-      }));
-
-      return { resources };
-    }
-
-    if (method === "resources/read") {
-      const uri = params.uri;
-
-      if (!uri.startsWith(profile.uriPrefix)) {
-        throw new Error(`Invalid resource URI: ${uri}`);
-      }
-
-      const toolName = uri.slice(profile.uriPrefix.length);
-      const html = await getOrGenerateUI(toolName);
-
+    // Proxy to upstream directly
+    try {
+      const result = await upstreamClient.callTool({
+        name,
+        arguments: args || {},
+      });
+      return profile.useStructuredContent ? addStructuredContent(result) : result;
+    } catch (err) {
       return {
-        contents: [
+        content: [
           {
-            uri,
-            mimeType: profile.mimeType,
-            text: html,
+            type: "text",
+            text: `Tool call failed: ${err instanceof Error ? err.message : String(err)}`,
           },
         ],
+        isError: true,
       };
     }
-
-    throw new Error(`Unknown method: ${method}`);
   }
 
   let httpServer: ReturnType<typeof createServer> | null = null;
+  let mcpTransport: StreamableHTTPServerTransport | null = null;
 
   return {
     async start(): Promise<void> {
@@ -453,21 +428,16 @@ export async function createWrapperServer(
       if (hasToolList && hasToolGet && hasToolCall) {
         console.log("Detected meta-tool pattern, discovering inner tools...");
 
-        // Call TOOL_LIST to get available inner tools
         const listResult = await upstreamClient.callTool({
           name: "TOOL_LIST",
           arguments: {},
         });
 
-        // Parse the result (it's a Python-style list string)
         const listContent = listResult.content as Array<{ type: string; text: string }>;
         const listText = listContent?.[0]?.text || "[]";
 
-        // Parse Python-style dict list: [{'name': '...', 'description': '...'}]
-        // Use regex extraction since descriptions may contain apostrophes
         let innerToolList: Array<{ name: string; description: string }> = [];
         try {
-          // Match each {'name': '...', 'description': '...'} entry
           const entryPattern = /\{'name':\s*'([^']+)',\s*'description':\s*'((?:[^'\\]|\\.)*)'\}/g;
           let match;
           while ((match = entryPattern.exec(listText)) !== null) {
@@ -482,7 +452,6 @@ export async function createWrapperServer(
 
         console.log(`Found ${innerToolList.length} inner tools, fetching schemas...`);
 
-        // Fetch schema for each inner tool (limit to first 20 for performance)
         const toolsToFetch = innerToolList.slice(0, 20);
         for (const innerTool of toolsToFetch) {
           try {
@@ -494,17 +463,12 @@ export async function createWrapperServer(
             const getContent = getResult.content as Array<{ type: string; text: string }>;
             const getText = getContent?.[0]?.text || "{}";
 
-            // Extract parameters section (it's valid JSON structure within the Python dict)
-            // Format: {'name': '...', 'description': '...', 'parameters': {...}}
             const parametersMatch = getText.match(/'parameters':\s*(\{[\s\S]*\})\s*\}$/);
             let inputSchema: Record<string, unknown> = { type: "object", properties: {} };
 
             if (parametersMatch) {
               try {
-                // The parameters section is valid JSON-like, just with single quotes
-                // First, escape any embedded double quotes in descriptions
                 let paramsText = parametersMatch[1];
-                // Replace double quotes that aren't at word boundaries with escaped quotes
                 paramsText = paramsText.replace(/"([^"]+)"/g, "\\\"$1\\\"");
                 paramsText = paramsText
                   .replace(/'/g, '"')
@@ -513,7 +477,6 @@ export async function createWrapperServer(
                   .replace(/False/g, "false");
                 inputSchema = JSON.parse(paramsText);
               } catch {
-                // Parse failed - try extracting just the property names
                 const propsMatch = getText.match(/'properties':\s*\{([^}]+)/);
                 if (propsMatch) {
                   const propNames = propsMatch[1].match(/'(\w+)':/g);
@@ -529,7 +492,6 @@ export async function createWrapperServer(
               }
             }
 
-            // Add as a first-class tool (use description from TOOL_LIST)
             const toolDef: ToolDefinition = {
               name: innerTool.name,
               description: innerTool.description.replace(/\\n/g, " ").trim(),
@@ -545,7 +507,6 @@ export async function createWrapperServer(
           }
         }
 
-        // Remove the meta-tools from the exposed list (keep them internally)
         tools.delete("TOOL_LIST");
         tools.delete("TOOL_GET");
         tools.delete("TOOL_CALL");
@@ -553,12 +514,96 @@ export async function createWrapperServer(
         console.log(`Exposed ${innerTools.size} inner tools`);
       }
 
-      // Start HTTP server
+      // Create MCP SDK server with proper Streamable HTTP transport
+      const mcpServer = new Server(
+        { name: "mcp-gen-ui", version: "0.1.0" },
+        {
+          capabilities: {
+            tools: {},
+            resources: {},
+          },
+        },
+      );
+
+      // Register tools/list handler
+      mcpServer.setRequestHandler(
+        ListToolsRequestSchema,
+        async () => {
+          console.log("<-- tools/list");
+          const toolList = buildToolList();
+          console.log("--> tools/list response");
+          return { tools: toolList };
+        },
+      );
+
+      // Register tools/call handler
+      mcpServer.setRequestHandler(
+        CallToolRequestSchema,
+        async (request: any) => {
+          const { name, arguments: args } = request.params;
+          console.log(`<-- tools/call ${name}`);
+          const callResult = await handleToolCall(name, args);
+          console.log(`--> tools/call ${name} response`);
+          return callResult;
+        },
+      );
+
+      // Register resources/list handler
+      mcpServer.setRequestHandler(
+        ListResourcesRequestSchema,
+        async () => {
+          console.log("<-- resources/list");
+          const resources = Array.from(tools.values()).map((tool) => ({
+            uri: buildResourceUri(tool.name),
+            name: `${tool.name} UI`,
+            description: `Generated interactive UI for ${tool.name}`,
+            mimeType: profile.mimeType,
+          }));
+          console.log("--> resources/list response");
+          return { resources };
+        },
+      );
+
+      // Register resources/read handler
+      mcpServer.setRequestHandler(
+        ReadResourceRequestSchema,
+        async (request: any) => {
+          const uri = request.params.uri;
+          console.log(`<-- resources/read ${uri}`);
+
+          const toolName = extractToolName(uri);
+          if (!toolName) {
+            throw new Error(`Invalid resource URI: ${uri}`);
+          }
+          const html = await getOrGenerateUI(toolName);
+          console.log(`--> resources/read ${uri} response`);
+
+          return {
+            contents: [
+              {
+                uri,
+                mimeType: profile.mimeType,
+                text: html,
+              },
+            ],
+          };
+        },
+      );
+
+      // Create Streamable HTTP transport (stateless for single-user)
+      mcpTransport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
+
+      // Connect server to transport
+      await mcpServer.connect(mcpTransport);
+
+      // Start HTTP server routing to the transport
       httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
         // CORS headers
         res.setHeader("Access-Control-Allow-Origin", "*");
-        res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, mcp-session-id");
 
         if (req.method === "OPTIONS") {
           res.writeHead(204);
@@ -566,47 +611,21 @@ export async function createWrapperServer(
           return;
         }
 
-        if (req.method !== "POST") {
-          res.writeHead(405, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "Method not allowed" }));
-          return;
-        }
-
-        // Read body
-        let body = "";
-        for await (const chunk of req) {
-          body += chunk;
-        }
-
-        try {
-          const request = JSON.parse(body);
-          const { jsonrpc, id, method, params } = request;
-
-          if (jsonrpc !== "2.0") {
-            res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Invalid JSON-RPC version" }));
-            return;
+        // Route /mcp to the MCP transport
+        const url = new URL(req.url || "/", `http://localhost:${config.server.port}`);
+        if (url.pathname === "/mcp" || url.pathname === "/") {
+          try {
+            await mcpTransport!.handleRequest(req, res);
+          } catch (err) {
+            console.error("Transport error:", err);
+            if (!res.headersSent) {
+              res.writeHead(500, { "Content-Type": "application/json" });
+              res.end(JSON.stringify({ error: "Internal server error" }));
+            }
           }
-
-          console.log(`<-- ${method}`);
-          const result = await handleRequest(method, params || {});
-          console.log(`--> ${method} response`);
-
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
-        } catch (err) {
-          console.error("Request error:", err);
-          res.writeHead(500, { "Content-Type": "application/json" });
-          res.end(
-            JSON.stringify({
-              jsonrpc: "2.0",
-              id: null,
-              error: {
-                code: -32603,
-                message: err instanceof Error ? err.message : String(err),
-              },
-            })
-          );
+        } else {
+          res.writeHead(404, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ detail: "Not Found" }));
         }
       });
 
@@ -614,12 +633,16 @@ export async function createWrapperServer(
       await new Promise<void>((resolve) => {
         httpServer!.listen(port, () => {
           console.log(`MCP Gen-UI wrapper server listening on http://localhost:${port}`);
+          console.log(`  MCP endpoint: http://localhost:${port}/mcp`);
           resolve();
         });
       });
     },
 
     async stop(): Promise<void> {
+      if (mcpTransport) {
+        await mcpTransport.close();
+      }
       if (httpServer) {
         await new Promise<void>((resolve) => {
           httpServer!.close(() => resolve());

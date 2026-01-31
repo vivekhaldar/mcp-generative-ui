@@ -29,12 +29,16 @@ const mcpAppsOutputHandling = `OUTPUT HANDLING (CRITICAL):
 function getGenerateTemplate(profileName: StandardName): string {
   const outputHandling = profileName === "openai" ? openaiOutputHandling : mcpAppsOutputHandling;
 
-  return `Generate a UI for this MCP tool. Before writing code, briefly plan:
+  return `Generate a UI for this MCP tool.
+
+Before writing any HTML, think through your approach in an XML block that will be stripped from the output:
+<planning>
 1. What is the PRIMARY data to visualize? How should it look at a glance?
 2. What interactive elements does the user need? (form inputs, toggles, pagination)
 3. What color/visual theme fits this data domain?
+</planning>
 
-Then generate the complete HTML.
+Then output ONLY the complete HTML file starting with <!DOCTYPE html>. No other text before or after the HTML.
 
 ===TOOL_DEFINITION_START===
 TOOL NAME: {{toolName}}
@@ -146,8 +150,10 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
         try {
           const html = await llm.generate(profile.systemPrompt, userPrompt);
 
-          // Strip markdown code fences if present
+          // Strip any preamble text (planning, markdown fences, etc.) before the HTML
           let cleanHtml = html.trim();
+
+          // Strip markdown code fences if present
           if (cleanHtml.startsWith("```html")) {
             cleanHtml = cleanHtml.slice(7);
           } else if (cleanHtml.startsWith("```")) {
@@ -156,6 +162,24 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
           if (cleanHtml.endsWith("```")) {
             cleanHtml = cleanHtml.slice(0, -3);
           }
+          cleanHtml = cleanHtml.trim();
+
+          // Strip everything before <!DOCTYPE or <html (LLM planning text, explanations, etc.)
+          const doctypeIndex = cleanHtml.indexOf("<!DOCTYPE");
+          const htmlTagIndex = cleanHtml.indexOf("<html");
+          const htmlStart = doctypeIndex >= 0 ? doctypeIndex
+            : htmlTagIndex >= 0 ? htmlTagIndex
+            : -1;
+          if (htmlStart > 0) {
+            cleanHtml = cleanHtml.slice(htmlStart);
+          }
+
+          // Strip anything after closing </html> tag
+          const htmlEndIndex = cleanHtml.lastIndexOf("</html>");
+          if (htmlEndIndex >= 0) {
+            cleanHtml = cleanHtml.slice(0, htmlEndIndex + "</html>".length);
+          }
+
           cleanHtml = cleanHtml.trim();
 
           // Basic validation

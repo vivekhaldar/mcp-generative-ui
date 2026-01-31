@@ -36,6 +36,7 @@ export type StandardName = "openai" | "mcp-apps";
 export interface StandardProfile {
   name: StandardName;
   uriPrefix: string;
+  uriSuffix: string;
   mimeType: string;
   buildToolMeta(resourceUri: string): Record<string, unknown>;
   systemPrompt: string;
@@ -163,8 +164,9 @@ OUTPUT ONLY THE HTML FILE. No markdown, no explanation, no code fences.`;
 
 const openaiProfile: StandardProfile = {
   name: "openai",
-  uriPrefix: "ui://",
-  mimeType: "text/html",
+  uriPrefix: "ui://widget/",
+  uriSuffix: ".html",
+  mimeType: "text/html+skybridge",
   buildToolMeta(resourceUri: string) {
     return {
       "openai/outputTemplate": resourceUri,
@@ -179,6 +181,7 @@ const openaiProfile: StandardProfile = {
 const mcpAppsProfile: StandardProfile = {
   name: "mcp-apps",
   uriPrefix: "ui://",
+  uriSuffix: "",
   mimeType: "text/html;profile=mcp-app",
   buildToolMeta(resourceUri: string) {
     return {
