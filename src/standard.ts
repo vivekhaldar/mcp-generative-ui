@@ -1,6 +1,36 @@
 // ABOUTME: Defines standard profiles for OpenAI Apps SDK and MCP Apps.
 // ABOUTME: Centralizes all standard-specific values: URIs, MIME types, metadata, prompts.
 
+const sharedDesignGuidance = `
+DESIGN PHILOSOPHY:
+- Data visualization first, form second — output display is the hero
+- No walls of text — use cards, badges, charts, meters instead of paragraphs
+- Fully implemented — no placeholder text, no TODOs, no "coming soon"
+- Compact and scannable — this is a widget in a conversation, not a full-page app
+- Visually distinct — use color, hierarchy, whitespace; avoid generic admin-dashboard aesthetics
+
+WHAT NOT TO DO:
+- Don't dump raw JSON as primary display (JSON is only for the fallback toggle)
+- Don't create a wall of identical form fields with no visual hierarchy
+- Don't use placeholder data or lorem ipsum
+- Don't generate more than one screenful for simple data
+- Don't use alert()/confirm() — render feedback inline
+
+STYLING GUIDELINES:
+- Use CSS custom properties for theming (--primary, --bg, --text, --accent, --success, --error)
+- Pick 1 accent color that suits the data domain — not always blue
+- Compact spacing (12-16px padding, 8-12px gaps) — this is a widget
+- Responsive: may be 300-600px wide, use flex/grid
+- Subtle transitions on interactive elements (0.15s ease)
+- Form inputs should be compact and visually subordinate to data display
+
+COMMON MISTAKES TO AVOID:
+- Forgetting to handle null/undefined toolOutput on initial load
+- Using innerHTML with user data (XSS) — use textContent
+- Generating chart library from scratch instead of Canvas API for simple charts
+- All form fields in single vertical column when horizontal grouping is more compact
+- Missing loading states — always show spinner while awaiting results`;
+
 export type StandardName = "openai" | "mcp-apps";
 
 export interface StandardProfile {
@@ -41,9 +71,11 @@ REQUIREMENTS:
 3. Read initial data from window.openai.toolOutput and window.openai.toolInput
 4. Use window.openai.callTool(name, args) to call tools, await the returned Promise
 5. Include error handling with try/catch and display errors to users
-6. Style should be clean, functional, and use system fonts
+6. Follow the DESIGN PHILOSOPHY and STYLING GUIDELINES below
 7. The UI must be fully functional without any TODO comments or placeholders
 8. Include proper form labels (for accessibility)
+
+${sharedDesignGuidance}
 
 IMPORTANT - OUTPUT HANDLING:
 - window.openai.toolOutput may be null/undefined initially
@@ -99,9 +131,11 @@ REQUIREMENTS:
 5. Provide an input form to invoke the tool with new parameters
 6. Use app.callServerTool({ name, arguments }) to call tools from the UI
 7. Include error handling with try/catch and display errors to users
-8. Style should be clean, functional, and use system fonts
+8. Follow the DESIGN PHILOSOPHY and STYLING GUIDELINES below
 9. The UI must be fully functional without any TODO comments or placeholders
 10. Include proper form labels (for accessibility)
+
+${sharedDesignGuidance}
 
 IMPORTANT - OUTPUT HANDLING:
 - Tool results arrive via app.ontoolresult callback

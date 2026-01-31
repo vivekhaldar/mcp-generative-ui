@@ -29,7 +29,12 @@ const mcpAppsOutputHandling = `OUTPUT HANDLING (CRITICAL):
 function getGenerateTemplate(profileName: StandardName): string {
   const outputHandling = profileName === "openai" ? openaiOutputHandling : mcpAppsOutputHandling;
 
-  return `Generate a UI for this MCP tool:
+  return `Generate a UI for this MCP tool. Before writing code, briefly plan:
+1. What is the PRIMARY data to visualize? How should it look at a glance?
+2. What interactive elements does the user need? (form inputs, toggles, pagination)
+3. What color/visual theme fits this data domain?
+
+Then generate the complete HTML.
 
 ===TOOL_DEFINITION_START===
 TOOL NAME: {{toolName}}
@@ -54,13 +59,30 @@ REQUIREMENTS:
 ${outputHandling}
 
 VISUALIZATION GUIDANCE:
-- Weather data → show temperature prominently with weather icon/emoji, humidity, wind, conditions
-- Stock prices/trends → line chart or candlestick chart
-- Lists of items → table or cards
-- Single numeric values → large display with label and unit
-- Time series → chart with x-axis as time
-- Comparisons → bar chart or table
-- Forecasts → card layout for each day
+Choose the best pattern for the data. Mix patterns when data calls for it.
+
+SINGLE VALUE (temperature, price, score):
+→ Large prominent number with unit, label above, optional trend indicator
+
+KEY-VALUE PAIRS (weather, profile, config):
+→ Card layout with icon/emoji per field, grouped logically, important values emphasized
+
+LISTS/ARRAYS (search results, files, entries):
+→ Compact cards or table rows with count badge. Paginate if >10 items.
+
+TIME SERIES (history, metrics over time):
+→ Line/area chart via Canvas API. Show current value prominently. Label axes.
+
+COMPARISONS (A vs B, rankings):
+→ Horizontal bar chart or side-by-side cards with visual size encoding
+
+NESTED/HIERARCHICAL (trees, deep objects):
+→ Collapsible sections. Start collapsed for deep nesting.
+
+STATUS/BOOLEAN (health checks, flags):
+→ Color-coded badges (green/red/yellow) with labels
+
+ALWAYS: Use icons/emoji for categories, color for status, bold for key values.
 
 Remember: Output ONLY the complete HTML file, no markdown code fences or explanations.`;
 }
