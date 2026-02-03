@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 MCP Generative UI Wrapper is a proxy layer that wraps any "plain" MCP server (tools-only) and automatically generates interactive UI resources using an LLM at runtime. This enables rapid prototyping of MCP Apps from existing tool-based MCP servers without modifying the underlying server.
 
-**Current Status**: Design phase - product spec and technical design complete, implementation not yet started.
+**Current Status**: Implemented and working. Supports both MCP Apps and OpenAI Apps SDK standards, pipe composition with mcpblox.
 
 ## Key Concepts
 
@@ -65,8 +65,15 @@ Where:
 - Tool removal from upstream triggers cache invalidation
 
 ## Transport Support
-- Both stdio and SSE transports for upstream connection
-- Wrapper exposes itself as valid MCP server (stdio or SSE)
+- Stdio, SSE, HTTP (bearer auth), and Streamable HTTP transports for upstream connection
+- Wrapper exposes itself as Streamable HTTP MCP server
+
+## Pipe Composition
+- Reads upstream URL from stdin when piped (compatible with mcpblox pipe protocol)
+- Writes own URL to stdout for downstream pipe consumers
+- Defaults to OS-assigned port when stdout is piped
+- All logging goes to stderr to keep stdout clean for pipe protocol
+- Key files: `src/pipe.ts` (protocol), `src/log.ts` (stderr logging)
 
 ## Target Host
-V1 explicitly targets Claude Desktop as the primary MCP host with single-user operation.
+V1 explicitly targets Claude Desktop and ChatGPT (via chatgpt-app-sim) as primary MCP hosts with single-user operation.

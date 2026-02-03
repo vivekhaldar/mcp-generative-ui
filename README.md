@@ -63,10 +63,29 @@ mcp-gen-ui --upstream "uvx mcp-server-yfinance" --standard openai
 mcp-gen-ui --upstream "node my-server.js" --provider anthropic --model claude-sonnet-4-20250514 --port 8000
 ```
 
+## Pipe Composition (mcpblox)
+
+mcp-gen-ui can participate in [mcpblox](https://github.com/nicobailey/mcpblox) pipe chains. When stdin is a pipe, it reads the upstream URL from stdin. When stdout is a pipe, it writes its own URL to stdout for downstream consumers.
+
+```bash
+# mcpblox transforms → mcp-gen-ui adds UIs
+mcpblox --upstream "uvx yfmcp@latest" --prompt "rename tools" \
+  | mcp-gen-ui --provider anthropic --standard openai
+
+# Multi-stage pipeline
+mcpblox --upstream "uvx yfmcp@latest" --prompt "rename tools" \
+  | mcpblox --prompt "create synthetic compare_stocks tool" \
+  | mcpblox --prompt "hide all except compare_stocks and get_price_history" \
+  | mcp-gen-ui --standard openai --provider anthropic --port 18888
+```
+
+When piped, the server binds to an OS-assigned port (override with `--port`). All logs go to stderr so stdout stays clean for the pipe protocol.
+
 ## Features
 
 - **Zero-config**: Point at any MCP server, get UIs automatically
 - **Dual-standard**: Supports both MCP Apps and OpenAI Apps SDK
+- **Pipe composition**: Chain with mcpblox via Unix pipes for transform → UI pipelines
 - **On-demand generation**: Generate on first request, cache for performance
 - **Iterative refinement**: Natural language feedback to customize UIs
 - **Full interactivity**: Generated UIs can call tools, update dynamically
