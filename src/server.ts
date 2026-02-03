@@ -3,7 +3,7 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport, SSEClientTransport, HttpClientTransport } from "./transport/base.js";
+import { StdioClientTransport, SSEClientTransport, HttpClientTransport, StreamableHTTPClientTransport } from "./transport/base.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   ListToolsRequestSchema,
@@ -405,6 +405,9 @@ export async function createWrapperServer(
           url: new URL(config.upstream.url),
           bearerToken: config.upstream.bearerToken,
         });
+      } else if (config.upstream.transport === "streamable-http") {
+        log(`Connecting to upstream via Streamable HTTP: ${config.upstream.url}`);
+        transport = new StreamableHTTPClientTransport(new URL(config.upstream.url));
       } else {
         log(`Connecting to upstream via SSE: ${config.upstream.url}`);
         transport = new SSEClientTransport(new URL(config.upstream.url));

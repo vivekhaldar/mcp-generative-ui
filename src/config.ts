@@ -9,6 +9,7 @@ export interface WrapperConfig {
     | { transport: "stdio"; command: string; args: string[] }
     | { transport: "sse"; url: string }
     | { transport: "http"; url: string; bearerToken?: string }
+    | { transport: "streamable-http"; url: string }
     | { transport: "deferred" };
 
   // LLM configuration

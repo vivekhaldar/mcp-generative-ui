@@ -46,7 +46,7 @@ async function main() {
       const upstreamUrl = await readUpstreamUrl();
       log(`Received upstream URL: ${upstreamUrl}`);
       // Mutate config with resolved upstream
-      (config as any).upstream = { transport: "sse", url: upstreamUrl };
+      (config as any).upstream = { transport: "streamable-http", url: upstreamUrl };
     } else if (config.pipe.stdinIsPipe) {
       // Explicit upstream provided but stdin is a pipe — drain stdin so upstream doesn't block
       process.stdin.resume();

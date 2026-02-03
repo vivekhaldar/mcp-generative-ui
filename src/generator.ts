@@ -3,6 +3,7 @@
 
 import type { LLMClient } from "./llm.js";
 import { getStandardProfile, type StandardName, type StandardProfile } from "./standard.js";
+import { log } from "./log.js";
 
 // Generation prompt template (standard-agnostic)
 // The system prompt is provided by the StandardProfile.
@@ -149,7 +150,7 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
           userPrompt = userPrompt.replace("{{refinements}}", "");
         }
 
-        console.log(`Generating UI for tool: ${tool.name}...`);
+        log(`Generating UI for tool: ${tool.name}...`);
 
         // Generate with timeout
         const controller = new AbortController();
@@ -192,17 +193,17 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
 
           // Basic validation
           if (!cleanHtml.includes("<html") || !cleanHtml.includes(profile.validationMarker)) {
-            console.warn(`Generated HTML appears invalid (missing "${profile.validationMarker}"), using minimal UI`);
+            log(`Generated HTML appears invalid (missing "${profile.validationMarker}"), using minimal UI`);
             return { html: this.minimalUI(tool), isMinimal: true };
           }
 
-          console.log(`Generated UI for ${tool.name} (${cleanHtml.length} bytes)`);
+          log(`Generated UI for ${tool.name} (${cleanHtml.length} bytes)`);
           return { html: cleanHtml, isMinimal: false };
         } finally {
           clearTimeout(timeout);
         }
       } catch (err) {
-        console.error(`Failed to generate UI for ${tool.name}:`, err);
+        log(`Failed to generate UI for ${tool.name}: ${err}`);
         return { html: this.minimalUI(tool), isMinimal: true };
       }
     },

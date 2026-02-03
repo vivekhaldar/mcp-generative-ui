@@ -4,6 +4,7 @@
 import { createHash } from "crypto";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
+import { log } from "./log.js";
 
 export interface CacheEntry {
   html: string;
@@ -67,7 +68,7 @@ export function createCache(cacheDir: string): Cache {
         const data = Object.fromEntries(entries);
         writeFileSync(cacheFile, JSON.stringify(data, null, 2));
       } catch (err) {
-        console.error("Failed to save cache:", err);
+        log(`Failed to save cache: ${err}`);
       }
     },
 
@@ -79,10 +80,10 @@ export function createCache(cacheDir: string): Cache {
           for (const [key, entry] of Object.entries(data)) {
             entries.set(key, entry as CacheEntry);
           }
-          console.log(`Loaded ${entries.size} cached UI(s) from disk`);
+          log(`Loaded ${entries.size} cached UI(s) from disk`);
         }
       } catch (err) {
-        console.error("Failed to load cache:", err);
+        log(`Failed to load cache: ${err}`);
       }
     },
   };
