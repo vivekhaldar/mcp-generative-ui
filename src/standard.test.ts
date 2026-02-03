@@ -26,11 +26,11 @@ describe("openai profile", () => {
   const profile = getStandardProfile("openai");
 
   it("has correct URI prefix", () => {
-    expect(profile.uriPrefix).toBe("ui://");
+    expect(profile.uriPrefix).toBe("ui://widget/");
   });
 
   it("has correct MIME type", () => {
-    expect(profile.mimeType).toBe("text/html");
+    expect(profile.mimeType).toBe("text/html+skybridge");
   });
 
   it("builds tool meta with openai/outputTemplate", () => {
