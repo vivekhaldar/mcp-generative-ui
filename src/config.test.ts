@@ -1,13 +1,15 @@
-// ABOUTME: Tests for config parsing with the standard field.
-// ABOUTME: Verifies default, explicit, and invalid standard values.
+// ABOUTME: Tests for config parsing including standard and pipe fields.
+// ABOUTME: Verifies default, explicit, and invalid standard values plus pipe behavior.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { buildConfig } from "./config.js";
 
 describe("buildConfig standard field", () => {
   const baseOptions = {
     upstream: "node test-servers/weather-server.js",
     apiKey: "test-key-123",
+    stdinIsPipe: false,
+    stdoutIsPipe: false,
   };
 
   it("defaults to mcp-apps when standard is not specified", () => {
@@ -29,5 +31,77 @@ describe("buildConfig standard field", () => {
     expect(() => buildConfig({ ...baseOptions, standard: "invalid" })).toThrow(
       'Invalid standard: invalid'
     );
+  });
+});
+
+describe("buildConfig pipe behavior", () => {
+  const baseOptions = {
+    apiKey: "test-key-123",
+    stdinIsPipe: false,
+    stdoutIsPipe: false,
+  };
+
+  it("populates pipe state from options", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstream: "node server.js",
+      stdinIsPipe: true,
+      stdoutIsPipe: true,
+    });
+    expect(config.pipe).toEqual({ stdinIsPipe: true, stdoutIsPipe: true });
+  });
+
+  it("does not throw when upstream missing and stdin is pipe", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      stdinIsPipe: true,
+    });
+    expect(config.upstream).toEqual({ transport: "deferred" });
+  });
+
+  it("throws when upstream missing and stdin is not pipe", () => {
+    expect(() => buildConfig(baseOptions)).toThrow(
+      "Must specify --upstream or --upstream-url"
+    );
+  });
+
+  it("defaults port to 0 when stdout is pipe and no explicit port", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstream: "node server.js",
+      stdoutIsPipe: true,
+    });
+    expect(config.server.port).toBe(0);
+  });
+
+  it("defaults port to 8000 when stdout is not pipe and no explicit port", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstream: "node server.js",
+    });
+    expect(config.server.port).toBe(8000);
+  });
+
+  it("uses explicit port even when stdout is pipe", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstream: "node server.js",
+      stdoutIsPipe: true,
+      port: 9999,
+    });
+    expect(config.server.port).toBe(9999);
+  });
+
+  it("uses explicit upstream even when stdin is pipe", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstream: "node server.js",
+      stdinIsPipe: true,
+    });
+    expect(config.upstream).toEqual({
+      transport: "stdio",
+      command: "node",
+      args: ["server.js"],
+    });
   });
 });

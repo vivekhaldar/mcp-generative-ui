@@ -12,8 +12,10 @@ import {
   ReadResourceRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, IncomingMessage, ServerResponse } from "http";
+import type { AddressInfo } from "net";
 import type { WrapperConfig } from "./config.js";
 import type { LLMClient } from "./llm.js";
+import { log } from "./log.js";
 import {
   createCache,
   computeSchemaHash,
@@ -23,7 +25,7 @@ import { createGenerator, type ToolDefinition } from "./generator.js";
 import { getStandardProfile } from "./standard.js";
 
 export interface WrapperServer {
-  start(): Promise<void>;
+  start(): Promise<number>;
   stop(): Promise<void>;
 }
 
@@ -133,7 +135,7 @@ export async function createWrapperServer(
         }
       }
 
-      console.log(`Getting sample output for ${toolName} with args:`, sampleArgs);
+      log(`Getting sample output for ${toolName} with args: ${JSON.stringify(sampleArgs)}`);
 
       // Call the tool
       let result;
@@ -154,7 +156,7 @@ export async function createWrapperServer(
 
       return result;
     } catch (err) {
-      console.warn(`Failed to get sample output for ${toolName}:`, err);
+      log(`Failed to get sample output for ${toolName}: ${err}`);
       return undefined;
     }
   }
@@ -194,16 +196,16 @@ export async function createWrapperServer(
     const cName = cacheToolName(toolName);
     const cached = cache.get(cName, schemaHash, refinementHash);
     if (cached) {
-      console.log(`Cache hit for ${toolName}`);
+      log(`Cache hit for ${toolName}`);
       return cached.html;
     }
 
     // Get sample output to help LLM generate better UI
-    console.log(`Cache miss for ${toolName}, getting sample output...`);
+    log(`Cache miss for ${toolName}, getting sample output...`);
     const sampleOutput = await getSampleOutput(toolName, tool);
 
     // Generate with sample output
-    console.log(`Generating UI for ${toolName}...`);
+    log(`Generating UI for ${toolName}...`);
     const toolWithSample = { ...tool, sampleOutput };
     const { html } = await generator.generate(toolWithSample, history);
 
@@ -384,30 +386,32 @@ export async function createWrapperServer(
   let mcpTransport: StreamableHTTPServerTransport | null = null;
 
   return {
-    async start(): Promise<void> {
+    async start(): Promise<number> {
       // Connect to upstream
+      if (config.upstream.transport === "deferred") {
+        throw new Error("Cannot start server with deferred upstream. Resolve upstream URL first.");
+      }
+
       let transport;
       if (config.upstream.transport === "stdio") {
-        console.log(
-          `Connecting to upstream via stdio: ${config.upstream.command}`
-        );
+        log(`Connecting to upstream via stdio: ${config.upstream.command}`);
         transport = new StdioClientTransport({
           command: config.upstream.command,
           args: config.upstream.args,
         });
       } else if (config.upstream.transport === "http") {
-        console.log(`Connecting to upstream via HTTP: ${config.upstream.url}`);
+        log(`Connecting to upstream via HTTP: ${config.upstream.url}`);
         transport = new HttpClientTransport({
           url: new URL(config.upstream.url),
           bearerToken: config.upstream.bearerToken,
         });
       } else {
-        console.log(`Connecting to upstream via SSE: ${config.upstream.url}`);
+        log(`Connecting to upstream via SSE: ${config.upstream.url}`);
         transport = new SSEClientTransport(new URL(config.upstream.url));
       }
 
       await upstreamClient.connect(transport);
-      console.log("Connected to upstream server");
+      log("Connected to upstream server");
 
       // Fetch tools from upstream
       const result = await upstreamClient.listTools();
@@ -418,7 +422,7 @@ export async function createWrapperServer(
           inputSchema: tool.inputSchema as Record<string, unknown>,
         });
       }
-      console.log(`Discovered ${tools.size} tool(s) from upstream`);
+      log(`Discovered ${tools.size} tool(s) from upstream`);
 
       // Check if upstream uses meta-tool pattern (has TOOL_LIST, TOOL_GET, TOOL_CALL)
       const hasToolList = tools.has("TOOL_LIST");
@@ -426,7 +430,7 @@ export async function createWrapperServer(
       const hasToolCall = tools.has("TOOL_CALL");
 
       if (hasToolList && hasToolGet && hasToolCall) {
-        console.log("Detected meta-tool pattern, discovering inner tools...");
+        log("Detected meta-tool pattern, discovering inner tools...");
 
         const listResult = await upstreamClient.callTool({
           name: "TOOL_LIST",
@@ -447,10 +451,10 @@ export async function createWrapperServer(
             });
           }
         } catch (e) {
-          console.warn("Failed to parse TOOL_LIST response:", e);
+          log(`Failed to parse TOOL_LIST response: ${e}`);
         }
 
-        console.log(`Found ${innerToolList.length} inner tools, fetching schemas...`);
+        log(`Found ${innerToolList.length} inner tools, fetching schemas...`);
 
         const toolsToFetch = innerToolList.slice(0, 20);
         for (const innerTool of toolsToFetch) {
@@ -501,9 +505,9 @@ export async function createWrapperServer(
             tools.set(innerTool.name, toolDef);
             innerTools.add(innerTool.name);
 
-            console.log(`  + ${innerTool.name}`);
+            log(`  + ${innerTool.name}`);
           } catch (e) {
-            console.warn(`  Failed to fetch schema for ${innerTool.name}:`, e);
+            log(`  Failed to fetch schema for ${innerTool.name}: ${e}`);
           }
         }
 
@@ -511,7 +515,7 @@ export async function createWrapperServer(
         tools.delete("TOOL_GET");
         tools.delete("TOOL_CALL");
 
-        console.log(`Exposed ${innerTools.size} inner tools`);
+        log(`Exposed ${innerTools.size} inner tools`);
       }
 
       // Create MCP SDK server with proper Streamable HTTP transport
@@ -529,9 +533,9 @@ export async function createWrapperServer(
       mcpServer.setRequestHandler(
         ListToolsRequestSchema,
         async () => {
-          console.log("<-- tools/list");
+          log("<-- tools/list");
           const toolList = buildToolList();
-          console.log("--> tools/list response");
+          log("--> tools/list response");
           return { tools: toolList };
         },
       );
@@ -541,9 +545,9 @@ export async function createWrapperServer(
         CallToolRequestSchema,
         async (request: any) => {
           const { name, arguments: args } = request.params;
-          console.log(`<-- tools/call ${name}`);
+          log(`<-- tools/call ${name}`);
           const callResult = await handleToolCall(name, args);
-          console.log(`--> tools/call ${name} response`);
+          log(`--> tools/call ${name} response`);
           return callResult;
         },
       );
@@ -552,14 +556,14 @@ export async function createWrapperServer(
       mcpServer.setRequestHandler(
         ListResourcesRequestSchema,
         async () => {
-          console.log("<-- resources/list");
+          log("<-- resources/list");
           const resources = Array.from(tools.values()).map((tool) => ({
             uri: buildResourceUri(tool.name),
             name: `${tool.name} UI`,
             description: `Generated interactive UI for ${tool.name}`,
             mimeType: profile.mimeType,
           }));
-          console.log("--> resources/list response");
+          log("--> resources/list response");
           return { resources };
         },
       );
@@ -569,14 +573,14 @@ export async function createWrapperServer(
         ReadResourceRequestSchema,
         async (request: any) => {
           const uri = request.params.uri;
-          console.log(`<-- resources/read ${uri}`);
+          log(`<-- resources/read ${uri}`);
 
           const toolName = extractToolName(uri);
           if (!toolName) {
             throw new Error(`Invalid resource URI: ${uri}`);
           }
           const html = await getOrGenerateUI(toolName);
-          console.log(`--> resources/read ${uri} response`);
+          log(`--> resources/read ${uri} response`);
 
           return {
             contents: [
@@ -611,13 +615,20 @@ export async function createWrapperServer(
           return;
         }
 
-        // Route /mcp to the MCP transport
-        const url = new URL(req.url || "/", `http://localhost:${config.server.port}`);
+        const url = new URL(req.url || "/", `http://localhost`);
+
+        if (url.pathname === "/health") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ status: "ok" }));
+          return;
+        }
+
+        // Route /mcp and / to the MCP transport
         if (url.pathname === "/mcp" || url.pathname === "/") {
           try {
             await mcpTransport!.handleRequest(req, res);
           } catch (err) {
-            console.error("Transport error:", err);
+            log(`Transport error: ${err}`);
             if (!res.headersSent) {
               res.writeHead(500, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ error: "Internal server error" }));
@@ -629,14 +640,16 @@ export async function createWrapperServer(
         }
       });
 
-      const port = config.server.port;
-      await new Promise<void>((resolve) => {
-        httpServer!.listen(port, () => {
-          console.log(`MCP Gen-UI wrapper server listening on http://localhost:${port}`);
-          console.log(`  MCP endpoint: http://localhost:${port}/mcp`);
-          resolve();
+      const requestedPort = config.server.port;
+      const boundPort = await new Promise<number>((resolve) => {
+        httpServer!.listen(requestedPort, () => {
+          const addr = httpServer!.address() as AddressInfo;
+          log(`MCP Gen-UI wrapper server listening on http://localhost:${addr.port}`);
+          log(`  MCP endpoint: http://localhost:${addr.port}/mcp`);
+          resolve(addr.port);
         });
       });
+      return boundPort;
     },
 
     async stop(): Promise<void> {

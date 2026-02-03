@@ -8,7 +8,8 @@ export interface WrapperConfig {
   upstream:
     | { transport: "stdio"; command: string; args: string[] }
     | { transport: "sse"; url: string }
-    | { transport: "http"; url: string; bearerToken?: string };
+    | { transport: "http"; url: string; bearerToken?: string }
+    | { transport: "deferred" };
 
   // LLM configuration
   llm: {
@@ -29,6 +30,12 @@ export interface WrapperConfig {
   server: {
     port: number;
   };
+
+  // Pipe state for mcpblox composition
+  pipe: {
+    stdinIsPipe: boolean;
+    stdoutIsPipe: boolean;
+  };
 }
 
 export interface CLIOptions {
@@ -41,9 +48,15 @@ export interface CLIOptions {
   cacheDir?: string;
   port?: number;
   standard?: string;
+  stdinIsPipe?: boolean;
+  stdoutIsPipe?: boolean;
 }
 
 export function buildConfig(options: CLIOptions): WrapperConfig {
+  // Detect pipe state (allow override for testing)
+  const stdinIsPipe = options.stdinIsPipe ?? !process.stdin.isTTY;
+  const stdoutIsPipe = options.stdoutIsPipe ?? !process.stdout.isTTY;
+
   // Determine upstream transport
   let upstream: WrapperConfig["upstream"];
   if (options.upstreamUrl) {
@@ -64,6 +77,9 @@ export function buildConfig(options: CLIOptions): WrapperConfig {
       command: parts[0],
       args: parts.slice(1),
     };
+  } else if (stdinIsPipe) {
+    // Upstream URL will be read from stdin by index.ts
+    upstream = { transport: "deferred" };
   } else {
     throw new Error(
       "Must specify --upstream or --upstream-url"
@@ -101,8 +117,8 @@ export function buildConfig(options: CLIOptions): WrapperConfig {
   }
   const standard: StandardName = standardInput;
 
-  // Server port
-  const port = options.port || 8000;
+  // Server port: default to 0 (OS-assigned) when stdout is piped
+  const port = options.port ?? (stdoutIsPipe ? 0 : 8000);
 
   return {
     upstream,
@@ -117,6 +133,10 @@ export function buildConfig(options: CLIOptions): WrapperConfig {
     standard,
     server: {
       port,
+    },
+    pipe: {
+      stdinIsPipe,
+      stdoutIsPipe,
     },
   };
 }
