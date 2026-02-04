@@ -11,7 +11,7 @@ interface ReadOptions {
 
 export function readUpstreamUrl(opts: ReadOptions = {}): Promise<string> {
   const input = opts.input ?? process.stdin;
-  const timeoutMs = opts.timeoutMs ?? 30000;
+  const timeoutMs = opts.timeoutMs ?? 120000;
 
   return new Promise((resolve, reject) => {
     const rl = createInterface({ input });
