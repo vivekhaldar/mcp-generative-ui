@@ -53,8 +53,14 @@ The wrapper:
 # Wrap a stdio MCP server
 mcp-gen-ui --upstream "uvx mcp-server-yfinance" --provider anthropic
 
-# Wrap an HTTP MCP server
+# Wrap a remote MCP server (defaults to Streamable HTTP transport)
 mcp-gen-ui --upstream-url http://localhost:9000/mcp --provider openai
+
+# Force SSE transport for older servers
+mcp-gen-ui --upstream-url http://localhost:9000/sse --upstream-transport sse
+
+# Authenticate with a bearer token
+mcp-gen-ui --upstream-url http://localhost:9000/mcp --upstream-token my-secret
 
 # Use OpenAI Apps SDK standard instead of MCP Apps
 mcp-gen-ui --upstream "uvx mcp-server-yfinance" --standard openai
