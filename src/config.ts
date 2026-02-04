@@ -1,6 +1,7 @@
 // ABOUTME: Configuration parsing from CLI args and environment variables.
 // ABOUTME: Defines the WrapperConfig interface and buildConfig function.
 
+import { parse } from "shell-quote";
 import type { StandardName } from "./standard.js";
 
 export interface WrapperConfig {
@@ -76,7 +77,7 @@ export function buildConfig(options: CLIOptions): WrapperConfig {
     const transport = (options.upstreamTransport || "streamable-http") as "streamable-http" | "sse" | "http";
     upstream = { transport, url: options.upstreamUrl, bearerToken };
   } else if (options.upstream) {
-    const parts = options.upstream.split(" ");
+    const parts = parse(options.upstream).filter((p): p is string => typeof p === "string");
     upstream = {
       transport: "stdio",
       command: parts[0],

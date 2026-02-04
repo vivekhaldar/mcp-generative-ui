@@ -106,6 +106,38 @@ describe("buildConfig pipe behavior", () => {
   });
 });
 
+describe("buildConfig upstream quoted arguments", () => {
+  const baseOptions = {
+    apiKey: "test-key-123",
+    stdinIsPipe: false,
+    stdoutIsPipe: false,
+  };
+
+  it("parses single-quoted argument with spaces", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstream: "node server.js --name 'my server'",
+    });
+    expect(config.upstream).toEqual({
+      transport: "stdio",
+      command: "node",
+      args: ["server.js", "--name", "my server"],
+    });
+  });
+
+  it("parses double-quoted argument with spaces", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstream: 'node server.js --name "my server"',
+    });
+    expect(config.upstream).toEqual({
+      transport: "stdio",
+      command: "node",
+      args: ["server.js", "--name", "my server"],
+    });
+  });
+});
+
 describe("buildConfig upstream transport", () => {
   const baseOptions = {
     apiKey: "test-key-123",
