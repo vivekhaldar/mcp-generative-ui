@@ -23,6 +23,8 @@ program
   .option("--cache-dir <dir>", "Cache directory", ".mcp-gen-ui-cache")
   .option("--standard <standard>", "UI standard: openai or mcp-apps", "mcp-apps")
   .option("--port <port>", "Server port (for HTTP mode)")
+  .option("--prompt <text>", "Additional prompt instructions for UI generation")
+  .option("--prompt-file <path>", "File containing additional prompt instructions for UI generation")
   .parse();
 
 const options = program.opts();
@@ -40,6 +42,8 @@ async function main() {
       cacheDir: options.cacheDir,
       standard: options.standard,
       port: options.port ? parseInt(options.port, 10) : undefined,
+      prompt: options.prompt,
+      promptFile: options.promptFile,
     });
 
     // If upstream is deferred, read it from stdin pipe
@@ -63,6 +67,9 @@ async function main() {
     log(`  LLM: ${config.llm.provider} (${config.llm.model || "default model"})`);
     log(`  Cache: ${config.cache.directory}`);
     log(`  Standard: ${config.standard}`);
+    if (config.prompt) {
+      log(`  Prompt: ${config.prompt.length} chars`);
+    }
 
     const llm = createLLMClient(config.llm);
     const server = await createWrapperServer(config, llm);

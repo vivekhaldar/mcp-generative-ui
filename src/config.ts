@@ -2,6 +2,7 @@
 // ABOUTME: Defines the WrapperConfig interface and buildConfig function.
 
 import { parse } from "shell-quote";
+import { readFileSync } from "fs";
 import type { StandardName } from "./standard.js";
 
 export interface WrapperConfig {
@@ -38,6 +39,9 @@ export interface WrapperConfig {
     stdinIsPipe: boolean;
     stdoutIsPipe: boolean;
   };
+
+  // Additional prompt for UI generation
+  prompt?: string;
 }
 
 export interface CLIOptions {
@@ -53,6 +57,8 @@ export interface CLIOptions {
   standard?: string;
   stdinIsPipe?: boolean;
   stdoutIsPipe?: boolean;
+  prompt?: string;
+  promptFile?: string;
 }
 
 export function buildConfig(options: CLIOptions): WrapperConfig {
@@ -123,6 +129,15 @@ export function buildConfig(options: CLIOptions): WrapperConfig {
   }
   const standard: StandardName = standardInput;
 
+  // Resolve additional prompt (file contents + inline, concatenated)
+  let prompt: string | undefined;
+  if (options.promptFile) {
+    const fileContents = readFileSync(options.promptFile, "utf-8").trim();
+    prompt = options.prompt ? `${fileContents}\n${options.prompt}` : fileContents;
+  } else if (options.prompt) {
+    prompt = options.prompt;
+  }
+
   // Server port: default to 0 (OS-assigned) when stdout is piped
   const port = options.port ?? (stdoutIsPipe ? 0 : 8000);
 
@@ -144,5 +159,6 @@ export function buildConfig(options: CLIOptions): WrapperConfig {
       stdinIsPipe,
       stdoutIsPipe,
     },
+    prompt,
   };
 }

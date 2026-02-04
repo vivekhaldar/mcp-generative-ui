@@ -128,6 +128,8 @@ The wrapped MCP server can:
 - `--provider anthropic|openai`
 - `--model` override
 - `--cache-dir` for persistence
+- `--prompt "text"` for additional UI generation instructions
+- `--prompt-file <path>` to load instructions from a file
 
 **Files:**
 - `src/index.ts`
@@ -234,6 +236,12 @@ npx mcp-gen-ui --upstream-url "https://mcp.alphavantage.co/" --provider openai
 
 # Custom cache directory
 npx mcp-gen-ui --upstream-url "..." --cache-dir ~/.cache/mcp-gen-ui
+
+# Custom prompt for UI generation style
+npx mcp-gen-ui --upstream-url "..." --prompt "Use a dark theme with purple accents"
+
+# Load prompt from file
+npx mcp-gen-ui --upstream-url "..." --prompt-file ./my-ui-style.txt
 ```
 
 ---

@@ -181,6 +181,52 @@ describe("minimal UI form generation", () => {
   });
 });
 
+describe("additional prompt injection", () => {
+  it("appends additional prompt to user prompt when provided", async () => {
+    const { llm, captured } = capturingLLM(
+      '<html><body><script>window.openai.toolOutput</script></body></html>'
+    );
+    const gen = createGenerator({ llm, standard: "openai", prompt: "Use dark theme with purple accents" });
+    await gen.generate(sampleTool);
+    expect(captured[0].user).toContain("===ADDITIONAL_INSTRUCTIONS_START===");
+    expect(captured[0].user).toContain("Use dark theme with purple accents");
+    expect(captured[0].user).toContain("===ADDITIONAL_INSTRUCTIONS_END===");
+  });
+
+  it("does not include additional instructions section when prompt is undefined", async () => {
+    const { llm, captured } = capturingLLM(
+      '<html><body><script>window.openai.toolOutput</script></body></html>'
+    );
+    const gen = createGenerator({ llm, standard: "openai" });
+    await gen.generate(sampleTool);
+    expect(captured[0].user).not.toContain("===ADDITIONAL_INSTRUCTIONS_START===");
+  });
+
+  it("additional prompt appears after tool definition and refinements", async () => {
+    const { llm, captured } = capturingLLM(
+      '<html><body><script>window.openai.toolOutput</script></body></html>'
+    );
+    const gen = createGenerator({ llm, standard: "openai", prompt: "Custom instruction" });
+    await gen.generate(sampleTool, ["make it red"]);
+    const user = captured[0].user;
+    const toolDefEnd = user.indexOf("===TOOL_DEFINITION_END===");
+    const refinementPos = user.indexOf("make it red");
+    const promptPos = user.indexOf("===ADDITIONAL_INSTRUCTIONS_START===");
+    expect(toolDefEnd).toBeLessThan(refinementPos);
+    expect(refinementPos).toBeLessThan(promptPos);
+  });
+
+  it("works with mcp-apps standard", async () => {
+    const { llm, captured } = capturingLLM(
+      '<html><body><script type="module">import { App } from "@modelcontextprotocol/ext-apps";</script></body></html>'
+    );
+    const gen = createGenerator({ llm, standard: "mcp-apps", prompt: "Use monospace fonts" });
+    await gen.generate(sampleTool);
+    expect(captured[0].user).toContain("Use monospace fonts");
+    expect(captured[0].user).toContain("===ADDITIONAL_INSTRUCTIONS_START===");
+  });
+});
+
 describe("strips markdown code fences", () => {
   it("strips ```html fences for openai", async () => {
     const llm = fakeLLM('```html\n<html><body><script>window.openai.toolOutput</script></body></html>\n```');

@@ -111,10 +111,11 @@ export interface GeneratorOptions {
   llm: LLMClient;
   standard?: StandardName;
   timeoutMs?: number;
+  prompt?: string;
 }
 
 export function createGenerator(options: GeneratorOptions) {
-  const { llm, standard = "mcp-apps", timeoutMs = 30000 } = options;
+  const { llm, standard = "mcp-apps", timeoutMs = 30000, prompt: additionalPrompt } = options;
   const profile = getStandardProfile(standard);
 
   return {
@@ -148,6 +149,11 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
           userPrompt = userPrompt.replace("{{refinements}}", refinementText);
         } else {
           userPrompt = userPrompt.replace("{{refinements}}", "");
+        }
+
+        // Append additional prompt instructions if provided
+        if (additionalPrompt) {
+          userPrompt += `\n\n===ADDITIONAL_INSTRUCTIONS_START===\n${additionalPrompt}\n===ADDITIONAL_INSTRUCTIONS_END===`;
         }
 
         log(`Generating UI for tool: ${tool.name}...`);

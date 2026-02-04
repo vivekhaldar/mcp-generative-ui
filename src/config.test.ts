@@ -1,8 +1,11 @@
-// ABOUTME: Tests for config parsing including standard and pipe fields.
-// ABOUTME: Verifies default, explicit, and invalid standard values plus pipe behavior.
+// ABOUTME: Tests for config parsing including standard, pipe, and prompt fields.
+// ABOUTME: Verifies default, explicit, and invalid standard values plus pipe and prompt behavior.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { buildConfig } from "./config.js";
+import { writeFileSync, unlinkSync, mkdirSync } from "fs";
+import { join } from "path";
+import { tmpdir } from "os";
 
 describe("buildConfig standard field", () => {
   const baseOptions = {
@@ -239,5 +242,52 @@ describe("buildConfig upstream transport", () => {
       command: "node",
       args: ["server.js"],
     });
+  });
+});
+
+describe("buildConfig prompt options", () => {
+  const baseOptions = {
+    upstream: "node server.js",
+    apiKey: "test-key-123",
+    stdinIsPipe: false,
+    stdoutIsPipe: false,
+  };
+
+  const tmpFile = join(tmpdir(), "mcp-gen-ui-test-prompt.txt");
+
+  afterEach(() => {
+    try { unlinkSync(tmpFile); } catch {}
+  });
+
+  it("config.prompt is undefined when neither --prompt nor --prompt-file given", () => {
+    const config = buildConfig(baseOptions);
+    expect(config.prompt).toBeUndefined();
+  });
+
+  it("sets config.prompt from --prompt", () => {
+    const config = buildConfig({ ...baseOptions, prompt: "Use dark theme" });
+    expect(config.prompt).toBe("Use dark theme");
+  });
+
+  it("sets config.prompt from --prompt-file", () => {
+    writeFileSync(tmpFile, "Use blue accents\n");
+    const config = buildConfig({ ...baseOptions, promptFile: tmpFile });
+    expect(config.prompt).toBe("Use blue accents");
+  });
+
+  it("concatenates file then inline when both --prompt-file and --prompt given", () => {
+    writeFileSync(tmpFile, "File instructions");
+    const config = buildConfig({
+      ...baseOptions,
+      promptFile: tmpFile,
+      prompt: "Inline instructions",
+    });
+    expect(config.prompt).toBe("File instructions\nInline instructions");
+  });
+
+  it("throws when --prompt-file points to nonexistent file", () => {
+    expect(() =>
+      buildConfig({ ...baseOptions, promptFile: "/nonexistent/path.txt" })
+    ).toThrow();
   });
 });

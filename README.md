@@ -67,6 +67,12 @@ mcp-gen-ui --upstream "uvx mcp-server-yfinance" --standard openai
 
 # Specify model and port
 mcp-gen-ui --upstream "node my-server.js" --provider anthropic --model claude-sonnet-4-20250514 --port 8000
+
+# Custom prompt to guide UI generation style
+mcp-gen-ui --upstream "node my-server.js" --prompt "Use a dark theme with purple accents"
+
+# Load prompt from a file
+mcp-gen-ui --upstream "node my-server.js" --prompt-file ./my-ui-style.txt
 ```
 
 ## Pipe Composition (mcpblox)

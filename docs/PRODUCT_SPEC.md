@@ -687,6 +687,12 @@ mcp-gen-ui --upstream "..." --debug --no-cache
 
 # Export generated UIs to files
 mcp-gen-ui --upstream "..." --export-dir ./generated-uis
+
+# Custom prompt for UI generation
+mcp-gen-ui --upstream "..." --prompt "Use a dark theme with purple accents"
+
+# Load prompt from file
+mcp-gen-ui --upstream "..." --prompt-file ./my-ui-style.txt
 ```
 
 ---

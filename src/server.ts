@@ -50,7 +50,7 @@ export async function createWrapperServer(
   cache.load();
 
   // Create generator
-  const generator = createGenerator({ llm, standard: config.standard });
+  const generator = createGenerator({ llm, standard: config.standard, prompt: config.prompt });
 
   // Create upstream client
   const upstreamClient = new Client(
@@ -190,7 +190,10 @@ export async function createWrapperServer(
 
     const schemaHash = computeSchemaHash(tool.inputSchema);
     const history = refinements.get(toolName) || [];
-    const refinementHash = computeRefinementHash(history);
+    const hashInput = config.prompt
+      ? [...history, "||", config.prompt]
+      : history;
+    const refinementHash = computeRefinementHash(hashInput);
 
     // Check cache (prefixed with standard to avoid cross-standard hits)
     const cName = cacheToolName(toolName);
@@ -336,7 +339,10 @@ export async function createWrapperServer(
       const elapsed = Date.now() - start;
 
       const schemaHash = computeSchemaHash(tool.inputSchema);
-      const refinementHash = computeRefinementHash(history);
+      const regenHashInput = config.prompt
+        ? [...history, "||", config.prompt]
+        : history;
+      const refinementHash = computeRefinementHash(regenHashInput);
       cache.set(cacheToolName(tool.name), schemaHash, refinementHash, html);
 
       const uri = buildResourceUri(toolName);
