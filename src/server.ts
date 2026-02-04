@@ -291,11 +291,21 @@ export async function createWrapperServer(
       refinements.set(toolName, history);
       cache.invalidate(cacheToolName(toolName));
 
+      log(`Regenerating UI for ${toolName} after refinement...`);
+      const start = Date.now();
+      await getOrGenerateUI(toolName);
+      const elapsed = Date.now() - start;
+
+      const uri = buildResourceUri(toolName);
+      mcpServer?.sendResourceUpdated({ uri });
+      mcpServer?.sendResourceListChanged();
+      log(`Sent resource update notification for ${toolName}`);
+
       return {
         content: [
           {
             type: "text",
-            text: `UI refinement queued for tool '${toolName}'. The updated UI will be available on next resource request.`,
+            text: `UI refined for tool '${toolName}'. Regeneration took ${elapsed}ms.`,
           },
         ],
       };
@@ -318,6 +328,7 @@ export async function createWrapperServer(
 
       cache.invalidate(cacheToolName(toolName));
 
+      log(`Regenerating UI for ${toolName}...`);
       const tool = tools.get(toolName)!;
       const history = refinements.get(toolName) || [];
       const start = Date.now();
@@ -327,6 +338,11 @@ export async function createWrapperServer(
       const schemaHash = computeSchemaHash(tool.inputSchema);
       const refinementHash = computeRefinementHash(history);
       cache.set(cacheToolName(tool.name), schemaHash, refinementHash, html);
+
+      const uri = buildResourceUri(toolName);
+      mcpServer?.sendResourceUpdated({ uri });
+      mcpServer?.sendResourceListChanged();
+      log(`Sent resource update notification for ${toolName}`);
 
       return {
         content: [
@@ -384,6 +400,7 @@ export async function createWrapperServer(
 
   let httpServer: ReturnType<typeof createServer> | null = null;
   let mcpTransport: StreamableHTTPServerTransport | null = null;
+  let mcpServer: Server | null = null;
 
   return {
     async start(): Promise<number> {
@@ -534,12 +551,12 @@ export async function createWrapperServer(
       }
 
       // Create MCP SDK server with proper Streamable HTTP transport
-      const mcpServer = new Server(
+      mcpServer = new Server(
         { name: "mcp-gen-ui", version: "0.1.0" },
         {
           capabilities: {
             tools: {},
-            resources: {},
+            resources: { subscribe: true },
           },
         },
       );
