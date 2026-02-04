@@ -7,9 +7,9 @@ export interface WrapperConfig {
   // Upstream server connection
   upstream:
     | { transport: "stdio"; command: string; args: string[] }
-    | { transport: "sse"; url: string }
+    | { transport: "sse"; url: string; bearerToken?: string }
     | { transport: "http"; url: string; bearerToken?: string }
-    | { transport: "streamable-http"; url: string }
+    | { transport: "streamable-http"; url: string; bearerToken?: string }
     | { transport: "deferred" };
 
   // LLM configuration
@@ -43,6 +43,7 @@ export interface CLIOptions {
   upstream?: string;
   upstreamUrl?: string;
   upstreamToken?: string;
+  upstreamTransport?: string;
   provider?: string;
   model?: string;
   apiKey?: string;
@@ -61,16 +62,19 @@ export function buildConfig(options: CLIOptions): WrapperConfig {
   // Determine upstream transport
   let upstream: WrapperConfig["upstream"];
   if (options.upstreamUrl) {
-    // Check for bearer token (CLI option or environment variable)
     const bearerToken =
       options.upstreamToken || process.env.MCP_UPSTREAM_BEARER_TOKEN;
-    if (bearerToken) {
-      // Use HTTP transport with bearer auth (for servers like Alpha Vantage)
-      upstream = { transport: "http", url: options.upstreamUrl, bearerToken };
-    } else {
-      // Use SSE transport (standard MCP remote transport)
-      upstream = { transport: "sse", url: options.upstreamUrl };
+
+    // Validate --upstream-transport if provided
+    const validTransports = ["streamable-http", "sse", "http"];
+    if (options.upstreamTransport && !validTransports.includes(options.upstreamTransport)) {
+      throw new Error(
+        `Invalid upstream transport: ${options.upstreamTransport}. Must be one of: ${validTransports.join(", ")}`
+      );
     }
+
+    const transport = (options.upstreamTransport || "streamable-http") as "streamable-http" | "sse" | "http";
+    upstream = { transport, url: options.upstreamUrl, bearerToken };
   } else if (options.upstream) {
     const parts = options.upstream.split(" ");
     upstream = {

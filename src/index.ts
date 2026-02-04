@@ -16,6 +16,7 @@ program
   .option("--upstream <command>", "Upstream MCP server command (stdio transport)")
   .option("--upstream-url <url>", "Upstream MCP server URL (HTTP/SSE transport)")
   .option("--upstream-token <token>", "Bearer token for upstream auth (or MCP_UPSTREAM_BEARER_TOKEN env)")
+  .option("--upstream-transport <type>", "Upstream transport: streamable-http (default), sse, or http")
   .option("--provider <provider>", "LLM provider: anthropic or openai", "anthropic")
   .option("--model <model>", "LLM model to use")
   .option("--api-key <key>", "LLM API key (or use ANTHROPIC_API_KEY/OPENAI_API_KEY env)")
@@ -32,6 +33,7 @@ async function main() {
       upstream: options.upstream,
       upstreamUrl: options.upstreamUrl,
       upstreamToken: options.upstreamToken,
+      upstreamTransport: options.upstreamTransport,
       provider: options.provider,
       model: options.model,
       apiKey: options.apiKey,

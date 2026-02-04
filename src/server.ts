@@ -407,10 +407,22 @@ export async function createWrapperServer(
         });
       } else if (config.upstream.transport === "streamable-http") {
         log(`Connecting to upstream via Streamable HTTP: ${config.upstream.url}`);
-        transport = new StreamableHTTPClientTransport(new URL(config.upstream.url));
+        const opts: { requestInit?: RequestInit } = {};
+        if (config.upstream.bearerToken) {
+          opts.requestInit = {
+            headers: { Authorization: `Bearer ${config.upstream.bearerToken}` },
+          };
+        }
+        transport = new StreamableHTTPClientTransport(new URL(config.upstream.url), opts);
       } else {
         log(`Connecting to upstream via SSE: ${config.upstream.url}`);
-        transport = new SSEClientTransport(new URL(config.upstream.url));
+        const opts: { requestInit?: RequestInit } = {};
+        if (config.upstream.bearerToken) {
+          opts.requestInit = {
+            headers: { Authorization: `Bearer ${config.upstream.bearerToken}` },
+          };
+        }
+        transport = new SSEClientTransport(new URL(config.upstream.url), opts);
       }
 
       await upstreamClient.connect(transport);

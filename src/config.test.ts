@@ -105,3 +105,107 @@ describe("buildConfig pipe behavior", () => {
     });
   });
 });
+
+describe("buildConfig upstream transport", () => {
+  const baseOptions = {
+    apiKey: "test-key-123",
+    stdinIsPipe: false,
+    stdoutIsPipe: false,
+  };
+
+  it("defaults to streamable-http when --upstream-url given without token", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstreamUrl: "http://localhost:3000/mcp",
+    });
+    expect(config.upstream).toEqual({
+      transport: "streamable-http",
+      url: "http://localhost:3000/mcp",
+      bearerToken: undefined,
+    });
+  });
+
+  it("defaults to streamable-http when --upstream-url given with token", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstreamUrl: "http://localhost:3000/mcp",
+      upstreamToken: "my-token",
+    });
+    expect(config.upstream).toEqual({
+      transport: "streamable-http",
+      url: "http://localhost:3000/mcp",
+      bearerToken: "my-token",
+    });
+  });
+
+  it("explicit --upstream-transport sse overrides default", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstreamUrl: "http://localhost:3000/sse",
+      upstreamTransport: "sse",
+    });
+    expect(config.upstream).toEqual({
+      transport: "sse",
+      url: "http://localhost:3000/sse",
+      bearerToken: undefined,
+    });
+  });
+
+  it("explicit --upstream-transport http uses http transport", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstreamUrl: "http://localhost:3000/api",
+      upstreamTransport: "http",
+    });
+    expect(config.upstream).toEqual({
+      transport: "http",
+      url: "http://localhost:3000/api",
+      bearerToken: undefined,
+    });
+  });
+
+  it("bearer token passed through on streamable-http transport", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstreamUrl: "http://localhost:3000/mcp",
+      upstreamTransport: "streamable-http",
+      upstreamToken: "secret",
+    });
+    expect(config.upstream).toHaveProperty("bearerToken", "secret");
+    expect(config.upstream).toHaveProperty("transport", "streamable-http");
+  });
+
+  it("bearer token passed through on sse transport", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstreamUrl: "http://localhost:3000/sse",
+      upstreamTransport: "sse",
+      upstreamToken: "secret",
+    });
+    expect(config.upstream).toHaveProperty("bearerToken", "secret");
+    expect(config.upstream).toHaveProperty("transport", "sse");
+  });
+
+  it("throws on invalid --upstream-transport value", () => {
+    expect(() =>
+      buildConfig({
+        ...baseOptions,
+        upstreamUrl: "http://localhost:3000/mcp",
+        upstreamTransport: "websocket",
+      })
+    ).toThrow("Invalid upstream transport: websocket");
+  });
+
+  it("--upstream-transport ignored when using --upstream (stdio)", () => {
+    const config = buildConfig({
+      ...baseOptions,
+      upstream: "node server.js",
+      upstreamTransport: "sse",
+    });
+    expect(config.upstream).toEqual({
+      transport: "stdio",
+      command: "node",
+      args: ["server.js"],
+    });
+  });
+});
