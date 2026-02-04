@@ -1063,7 +1063,7 @@ The wrapper exposes standard MCP methods plus wrapper-specific tools.
 {
   content: [{
     type: "text",
-    text: "UI refinement queued for tool 'get_forecast'. The updated UI will be available on next resource request."
+    text: "UI refined for tool 'get_forecast'. Regeneration took 1200ms."
   }]
 }
 ```
@@ -2540,7 +2540,7 @@ Invokes `_ui_refine` tool:
 
 2. Invalidate cache entry for `get_forecast`
 
-3. On next `ui://get_forecast` request, regenerate with prompt including:
+3. Eagerly regenerate UI with prompt including:
    ```
    USER REFINEMENT REQUESTS (apply ALL of these to the UI):
    - Show the forecast as a line chart with temperature on Y axis and date on X axis
@@ -2549,6 +2549,8 @@ Invokes `_ui_refine` tool:
 4. LLM generates new UI with chart visualization (using Canvas or SVG)
 
 5. Cache new generation
+
+6. Send `notifications/resources/updated` and `notifications/resources/list_changed` so the host re-fetches the resource
 
 **Result:**
 User sees updated UI with line chart instead of cards.
