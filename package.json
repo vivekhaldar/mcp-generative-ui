@@ -1,6 +1,6 @@
 {
   "name": "mcp-gen-ui",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "MCP wrapper that auto-generates interactive UIs for tools using LLM",
   "license": "Apache-2.0",
   "type": "module",
@@ -14,7 +14,7 @@
     "mcp-gen-ui": "./dist/index.js"
   },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --external:@anthropic-ai/sdk --external:openai --external:@ai-sdk/anthropic --external:@ai-sdk/openai --external:commander",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --banner:js=\"import { createRequire } from 'module'; const require = createRequire(import.meta.url);\" --external:@anthropic-ai/sdk --external:openai --external:@ai-sdk/anthropic --external:@ai-sdk/openai --external:commander",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
     "test": "vitest run",
