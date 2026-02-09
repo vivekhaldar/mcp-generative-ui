@@ -55,9 +55,10 @@ INPUT SCHEMA:
 
 REQUIREMENTS:
 - Theme: light
-- Create appropriate form controls for each input property
-- Handle required vs optional fields appropriately
-- Pre-fill default values from schema
+- Design the result display area as the hero — it occupies most of the viewport
+- On initial load (before results arrive), show a waiting/placeholder state — NOT a form
+- If including a form to re-invoke the tool, keep it compact and collapsed by default (e.g. inside a <details> element)
+- The form is OPTIONAL and SECONDARY — the primary job is displaying results beautifully
 - Add loading state while tool is executing
 - Show errors clearly with option to retry
 
@@ -299,7 +300,50 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
     }
     h1 { font-size: 1.25rem; margin: 0 0 4px 0; }
     .description { color: #666; font-size: 0.875rem; margin-bottom: 20px; }
-    .form-group { margin-bottom: 16px; }
+    .result {
+      padding: 16px;
+      background: #f8f9fa;
+      border-radius: 6px;
+      border: 1px solid #e9ecef;
+      min-height: 120px;
+    }
+    .result pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 0.8125rem;
+    }
+    .waiting {
+      color: #999;
+      font-size: 0.875rem;
+      text-align: center;
+      padding: 32px 16px;
+    }
+    .error {
+      display: none;
+      margin-top: 16px;
+      padding: 12px 16px;
+      background: #fee;
+      border: 1px solid #fcc;
+      border-radius: 6px;
+      color: #c00;
+      font-size: 0.875rem;
+    }
+    .loading {
+      display: none;
+      color: #666;
+      font-size: 0.875rem;
+      text-align: center;
+      padding: 32px 16px;
+    }
+    details { margin-top: 16px; }
+    summary {
+      cursor: pointer;
+      font-size: 0.8125rem;
+      color: #666;
+      user-select: none;
+    }
+    .form-group { margin-bottom: 12px; margin-top: 12px; }
     label {
       display: block;
       font-weight: 500;
@@ -323,7 +367,7 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
       background: #007bff;
       color: white;
       border: none;
-      padding: 10px 20px;
+      padding: 8px 16px;
       border-radius: 6px;
       font-size: 0.875rem;
       font-weight: 500;
@@ -331,52 +375,26 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
     }
     button:hover { background: #0056b3; }
     button:disabled { background: #ccc; cursor: not-allowed; }
-    .result {
-      margin-top: 20px;
-      padding: 16px;
-      background: #f8f9fa;
-      border-radius: 6px;
-      border: 1px solid #e9ecef;
-    }
-    .result pre {
-      margin: 0;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 0.8125rem;
-    }
-    .error {
-      display: none;
-      margin-top: 16px;
-      padding: 12px 16px;
-      background: #fee;
-      border: 1px solid #fcc;
-      border-radius: 6px;
-      color: #c00;
-      font-size: 0.875rem;
-    }
-    .loading {
-      display: none;
-      margin-top: 16px;
-      color: #666;
-      font-size: 0.875rem;
-    }
   </style>
 </head>
 <body>
   <h1>${tool.name}</h1>
   <p class="description">${tool.description || "No description"}</p>
 
-  <form id="tool-form">
-    ${formFields}
-    <button type="submit" id="submit-btn">Execute</button>
-  </form>
-
+  <div class="result" id="result">
+    <div class="waiting" id="waiting">Waiting for results...</div>
+    <pre id="result-content" style="display: none;"></pre>
+  </div>
   <div class="loading" id="loading">Executing...</div>
   <div class="error" id="error"></div>
-  <div class="result" id="result" style="display: none;">
-    <strong>Result:</strong>
-    <pre id="result-content"></pre>
-  </div>
+
+  <details id="form-details">
+    <summary>Re-run with different parameters</summary>
+    <form id="tool-form">
+      ${formFields}
+      <button type="submit" id="submit-btn">Execute</button>
+    </form>
+  </details>
 
   <script>
     var schema = ${JSON.stringify(tool.inputSchema)};
@@ -391,7 +409,8 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
     function renderResult(result) {
       document.getElementById('loading').style.display = 'none';
       document.getElementById('error').style.display = 'none';
-      document.getElementById('result').style.display = 'block';
+      document.getElementById('waiting').style.display = 'none';
+      document.getElementById('result-content').style.display = 'block';
       document.getElementById('submit-btn').disabled = false;
 
       try {
@@ -450,7 +469,8 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
 
         document.getElementById('loading').style.display = 'block';
         document.getElementById('error').style.display = 'none';
-        document.getElementById('result').style.display = 'none';
+        document.getElementById('waiting').style.display = 'none';
+        document.getElementById('result-content').style.display = 'none';
         document.getElementById('submit-btn').disabled = true;
 
         window.openai.callTool(toolName, args)
@@ -550,7 +570,50 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
     }
     h1 { font-size: 1.25rem; margin: 0 0 4px 0; }
     .description { color: #666; font-size: 0.875rem; margin-bottom: 20px; }
-    .form-group { margin-bottom: 16px; }
+    .result {
+      padding: 16px;
+      background: #f8f9fa;
+      border-radius: 6px;
+      border: 1px solid #e9ecef;
+      min-height: 120px;
+    }
+    .result pre {
+      margin: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-size: 0.8125rem;
+    }
+    .waiting {
+      color: #999;
+      font-size: 0.875rem;
+      text-align: center;
+      padding: 32px 16px;
+    }
+    .error {
+      display: none;
+      margin-top: 16px;
+      padding: 12px 16px;
+      background: #fee;
+      border: 1px solid #fcc;
+      border-radius: 6px;
+      color: #c00;
+      font-size: 0.875rem;
+    }
+    .loading {
+      display: none;
+      color: #666;
+      font-size: 0.875rem;
+      text-align: center;
+      padding: 32px 16px;
+    }
+    details { margin-top: 16px; }
+    summary {
+      cursor: pointer;
+      font-size: 0.8125rem;
+      color: #666;
+      user-select: none;
+    }
+    .form-group { margin-bottom: 12px; margin-top: 12px; }
     label {
       display: block;
       font-weight: 500;
@@ -574,7 +637,7 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
       background: #007bff;
       color: white;
       border: none;
-      padding: 10px 20px;
+      padding: 8px 16px;
       border-radius: 6px;
       font-size: 0.875rem;
       font-weight: 500;
@@ -582,52 +645,26 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
     }
     button:hover { background: #0056b3; }
     button:disabled { background: #ccc; cursor: not-allowed; }
-    .result {
-      margin-top: 20px;
-      padding: 16px;
-      background: #f8f9fa;
-      border-radius: 6px;
-      border: 1px solid #e9ecef;
-    }
-    .result pre {
-      margin: 0;
-      white-space: pre-wrap;
-      word-break: break-word;
-      font-size: 0.8125rem;
-    }
-    .error {
-      display: none;
-      margin-top: 16px;
-      padding: 12px 16px;
-      background: #fee;
-      border: 1px solid #fcc;
-      border-radius: 6px;
-      color: #c00;
-      font-size: 0.875rem;
-    }
-    .loading {
-      display: none;
-      margin-top: 16px;
-      color: #666;
-      font-size: 0.875rem;
-    }
   </style>
 </head>
 <body>
   <h1>${tool.name}</h1>
   <p class="description">${tool.description || "No description"}</p>
 
-  <form id="tool-form">
-    ${formFields}
-    <button type="submit" id="submit-btn">Execute</button>
-  </form>
-
+  <div class="result" id="result">
+    <div class="waiting" id="waiting">Waiting for results...</div>
+    <pre id="result-content" style="display: none;"></pre>
+  </div>
   <div class="loading" id="loading">Executing...</div>
   <div class="error" id="error"></div>
-  <div class="result" id="result" style="display: none;">
-    <strong>Result:</strong>
-    <pre id="result-content"></pre>
-  </div>
+
+  <details id="form-details">
+    <summary>Re-run with different parameters</summary>
+    <form id="tool-form">
+      ${formFields}
+      <button type="submit" id="submit-btn">Execute</button>
+    </form>
+  </details>
 
   <script type="module">
     import { App } from "@modelcontextprotocol/ext-apps";
@@ -646,7 +683,8 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
     function renderResult(result) {
       document.getElementById('loading').style.display = 'none';
       document.getElementById('error').style.display = 'none';
-      document.getElementById('result').style.display = 'block';
+      document.getElementById('waiting').style.display = 'none';
+      document.getElementById('result-content').style.display = 'block';
       document.getElementById('submit-btn').disabled = false;
 
       try {
@@ -698,7 +736,8 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
 
       document.getElementById('loading').style.display = 'block';
       document.getElementById('error').style.display = 'none';
-      document.getElementById('result').style.display = 'none';
+      document.getElementById('waiting').style.display = 'none';
+      document.getElementById('result-content').style.display = 'none';
       document.getElementById('submit-btn').disabled = true;
 
       app.callServerTool({ name: toolName, arguments: args })

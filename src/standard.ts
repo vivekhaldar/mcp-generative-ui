@@ -3,13 +3,16 @@
 
 const sharedDesignGuidance = `
 DESIGN PHILOSOPHY:
-- Data visualization first, form second — output display is the hero
+- Result display is the hero — the UI exists to render tool output beautifully
+- On initial load (before any result), show a brief waiting/placeholder state — NOT a form
+- If including a form to re-invoke the tool, keep it collapsed/hidden by default, expanded only on user action (e.g. a <details> element or toggle button)
 - No walls of text — use cards, badges, charts, meters instead of paragraphs
 - Fully implemented — no placeholder text, no TODOs, no "coming soon"
 - Compact and scannable — this is a widget in a conversation, not a full-page app
 - Visually distinct — use color, hierarchy, whitespace; avoid generic admin-dashboard aesthetics
 
 WHAT NOT TO DO:
+- Don't show a big form as the primary element — the form is secondary to results
 - Don't dump raw JSON as primary display (JSON is only for the fallback toggle)
 - Don't create a wall of identical form fields with no visual hierarchy
 - Don't use placeholder data or lorem ipsum
@@ -22,9 +25,10 @@ STYLING GUIDELINES:
 - Compact spacing (12-16px padding, 8-12px gaps) — this is a widget
 - Responsive: may be 300-600px wide, use flex/grid
 - Subtle transitions on interactive elements (0.15s ease)
-- Form inputs should be compact and visually subordinate to data display
+- The result display area should dominate the viewport; any form should be compact and visually subordinate
 
 COMMON MISTAKES TO AVOID:
+- Making the form the primary UI element instead of the result display
 - Forgetting to handle null/undefined toolOutput on initial load
 - Using innerHTML with user data (XSS) — use textContent
 - Generating chart library from scratch instead of Canvas API for simple charts
@@ -69,17 +73,19 @@ CRITICAL CONSTRAINTS:
 REQUIREMENTS:
 1. Output a single HTML file with inline <style> and <script>
 2. Wait for window.openai to be available before accessing it
-3. Read initial data from window.openai.toolOutput and window.openai.toolInput
-4. Use window.openai.callTool(name, args) to call tools, await the returned Promise
-5. Include error handling with try/catch and display errors to users
-6. Follow the DESIGN PHILOSOPHY and STYLING GUIDELINES below
-7. The UI must be fully functional without any TODO comments or placeholders
-8. Include proper form labels (for accessibility)
+3. Display window.openai.toolOutput prominently as the primary content — this is the UI's main job
+4. Design the result display area as the hero element occupying most of the viewport
+5. On initial load (before toolOutput is available), show a brief waiting state — NOT a form
+6. Optionally include a compact, collapsible form to re-invoke the tool with different parameters — the form must be collapsed by default
+7. Use window.openai.callTool(name, args) to call tools from the form, await the returned Promise
+8. Include error handling with try/catch and display errors to users
+9. Follow the DESIGN PHILOSOPHY and STYLING GUIDELINES below
+10. The UI must be fully functional without any TODO comments or placeholders
 
 ${sharedDesignGuidance}
 
 IMPORTANT - OUTPUT HANDLING:
-- window.openai.toolOutput may be null/undefined initially
+- window.openai.toolOutput may be null/undefined initially — show a waiting state, not a form
 - The result from callTool() is the raw tool result (not wrapped)
 - ALWAYS include a "Show Raw JSON" toggle as fallback
 - Wrap all rendering in try/catch - if parsing/rendering fails, show raw JSON
@@ -87,7 +93,7 @@ IMPORTANT - OUTPUT HANDLING:
 - Results may be arrays or objects - handle both
 - Truncate very large outputs (>100KB) with "Show more" option
 
-IMPORTANT - INPUT HANDLING:
+IMPORTANT - INPUT HANDLING (for the optional re-invocation form):
 - Coerce form values to correct types (boolean, number, integer)
 - Respect JSON Schema constraints when possible (min, max, pattern)
 - Pre-fill default values from schema
@@ -128,18 +134,19 @@ REQUIREMENTS:
 1. Output a single HTML file with inline <style> and <script type="module">
 2. Import as: import { App } from "@modelcontextprotocol/ext-apps";
 3. Initialize the App and call app.connect() AFTER setting up ontoolresult handler
-4. Implement app.ontoolresult to receive and render tool results
-5. Provide an input form to invoke the tool with new parameters
-6. Use app.callServerTool({ name, arguments }) to call tools from the UI
-7. Include error handling with try/catch and display errors to users
-8. Follow the DESIGN PHILOSOPHY and STYLING GUIDELINES below
-9. The UI must be fully functional without any TODO comments or placeholders
-10. Include proper form labels (for accessibility)
+4. Implement app.ontoolresult to receive and render tool results — this is the primary purpose of the UI
+5. Design the result display area as the hero element occupying most of the viewport
+6. On initial load (before any result arrives), show a brief waiting state — NOT a form
+7. Optionally include a compact, collapsible form to re-invoke the tool with different parameters — the form must be collapsed by default
+8. Use app.callServerTool({ name, arguments }) to call tools from the form
+9. Include error handling with try/catch and display errors to users
+10. Follow the DESIGN PHILOSOPHY and STYLING GUIDELINES below
+11. The UI must be fully functional without any TODO comments or placeholders
 
 ${sharedDesignGuidance}
 
 IMPORTANT - OUTPUT HANDLING:
-- Tool results arrive via app.ontoolresult callback
+- Tool results arrive via app.ontoolresult callback — render them prominently
 - Result has .content array with {type: "text", text: "..."} items
 - ALWAYS include a "Show Raw JSON" toggle as fallback
 - Wrap all rendering in try/catch - if parsing/rendering fails, show raw JSON
@@ -147,7 +154,7 @@ IMPORTANT - OUTPUT HANDLING:
 - Results may be arrays or objects - handle both
 - Truncate very large outputs (>100KB) with "Show more" option
 
-IMPORTANT - INPUT HANDLING:
+IMPORTANT - INPUT HANDLING (for the optional re-invocation form):
 - Coerce form values to correct types (boolean, number, integer)
 - Respect JSON Schema constraints when possible (min, max, pattern)
 - Pre-fill default values from schema
