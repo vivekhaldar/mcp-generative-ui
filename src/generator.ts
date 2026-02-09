@@ -754,6 +754,15 @@ IMPORTANT: Design the UI to visualize ALL the fields shown in this sample output
 
     await app.connect();
   </script>
+  <script>
+    setTimeout(function() {
+      var waiting = document.getElementById('waiting');
+      if (waiting && waiting.style.display !== 'none') {
+        waiting.innerHTML = 'Module failed to load. Check browser console for errors.';
+        waiting.style.color = '#c00';
+      }
+    }, 5000);
+  </script>
 </body>
 </html>`;
     },

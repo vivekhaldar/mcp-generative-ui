@@ -167,6 +167,19 @@ app.ontoolresult = (result) => {
 };
 await app.connect();
 
+MODULE LOAD FAILURE DETECTION:
+After the <script type="module"> block, add a regular <script> that detects if the module never loaded:
+<script>
+  setTimeout(function() {
+    var waiting = document.getElementById('waiting');
+    if (waiting && waiting.style.display !== 'none') {
+      waiting.innerHTML = 'Module failed to load. Check browser console for errors.';
+      waiting.style.color = '#c00';
+    }
+  }, 5000);
+</script>
+This is important because ESM import failures are silent (no window.onerror) — without this fallback, the UI silently hangs forever if the host fails to provide the module.
+
 OUTPUT ONLY THE HTML FILE. No markdown, no explanation, no code fences.`;
 
 const openaiProfile: StandardProfile = {
