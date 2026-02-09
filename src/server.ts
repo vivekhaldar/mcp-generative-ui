@@ -679,13 +679,25 @@ export async function createWrapperServer(
       });
 
       const requestedPort = config.server.port;
-      const boundPort = await new Promise<number>((resolve) => {
-        httpServer!.listen(requestedPort, () => {
-          const addr = httpServer!.address() as AddressInfo;
-          log(`MCP Gen-UI wrapper server listening on http://localhost:${addr.port}`);
-          log(`  MCP endpoint: http://localhost:${addr.port}/mcp`);
-          resolve(addr.port);
-        });
+      const boundPort = await new Promise<number>((resolve, reject) => {
+        const tryListen = (port: number) => {
+          httpServer!.once("error", (err: NodeJS.ErrnoException) => {
+            if (err.code === "EADDRINUSE" && port !== 0) {
+              log(`Port ${port} in use, using OS-assigned port`);
+              httpServer!.removeAllListeners("error");
+              tryListen(0);
+            } else {
+              reject(err);
+            }
+          });
+          httpServer!.listen(port, "localhost", () => {
+            const addr = httpServer!.address() as AddressInfo;
+            log(`MCP Gen-UI wrapper server listening on http://localhost:${addr.port}`);
+            log(`  MCP endpoint: http://localhost:${addr.port}/mcp`);
+            resolve(addr.port);
+          });
+        };
+        tryListen(requestedPort);
       });
       return boundPort;
     },
