@@ -13,7 +13,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import type { AddressInfo } from "net";
-import { createRequire } from "node:module";
+import { createRequire as makeRequire } from "node:module";
 import type { WrapperConfig } from "./config.js";
 import type { LLMClient } from "./llm.js";
 import { log } from "./log.js";
@@ -25,7 +25,7 @@ import {
 import { createGenerator, type ToolDefinition } from "./generator.js";
 import { getStandardProfile } from "./standard.js";
 
-const requireJson = createRequire(import.meta.url);
+const requireJson = makeRequire(import.meta.url);
 const { version: pkgVersion } = requireJson("../package.json");
 
 export interface WrapperServer {
