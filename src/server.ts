@@ -13,6 +13,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { createServer, IncomingMessage, ServerResponse } from "http";
 import type { AddressInfo } from "net";
+import { createRequire } from "node:module";
 import type { WrapperConfig } from "./config.js";
 import type { LLMClient } from "./llm.js";
 import { log } from "./log.js";
@@ -23,6 +24,9 @@ import {
 } from "./cache.js";
 import { createGenerator, type ToolDefinition } from "./generator.js";
 import { getStandardProfile } from "./standard.js";
+
+const requireJson = createRequire(import.meta.url);
+const { version: pkgVersion } = requireJson("../package.json");
 
 export interface WrapperServer {
   start(): Promise<number>;
@@ -277,6 +281,40 @@ export async function createWrapperServer(
 
   // Handle tool call
   async function handleToolCall(name: string, args: Record<string, unknown> | undefined) {
+    // Hidden metadata tool for export pipeline
+    if (name === "_mcp_metadata") {
+      // Eagerly generate UIs for all tools that aren't cached yet
+      const uiResources = [];
+      for (const [toolName] of tools) {
+        try {
+          const html = await getOrGenerateUI(toolName);
+          uiResources.push({
+            tool_name: toolName,
+            resource_uri: buildResourceUri(toolName),
+            html,
+          });
+        } catch (err) {
+          log(`Failed to generate UI for ${toolName}: ${err}`);
+        }
+      }
+
+      // Extract upstream URL from config
+      let upstreamUrl: string | null = null;
+      const upstream = config.upstream;
+      if (upstream.transport === "http" || upstream.transport === "sse" || upstream.transport === "streamable-http") {
+        upstreamUrl = upstream.url;
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({
+          stage: "ui",
+          version: pkgVersion,
+          upstream_url: upstreamUrl,
+          ui_resources: uiResources,
+        }) }]
+      };
+    }
+
     // Handle wrapper tools
     if (name === "_ui_refine") {
       const toolName = args?.toolName as string;
